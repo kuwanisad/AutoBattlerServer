@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+option csharp_namespace = "MasterServer";
+
+package masterserver;
+
+service MasterControl {
+  // 메인 서버가 마스터에 접속을 유지하는 양방향 스트림.
+  // 메인 서버 -> 마스터 : MainServerMessage (상태 보고, 추후 다른 종류의 보고/요청)
+  // 마스터 -> 메인 서버 : MasterMessage (명령 - 운영 공지 릴레이, 드레인 신호 등)
+  // 어떤 종류의 메시지든 수신했다는 사실 자체가 상대방이 살아있다는 신호(idle heartbeat 패턴).
+  // 별도 하트비트 메시지 없이, 오랫동안 보낼 업무 메시지가 없을 때만 빈 keepalive를 보낸다.
+  rpc Connect(stream MainServerMessage) returns (stream MasterMessage);
+
+  // 로비형 인스턴스가 매치를 확정했을 때, 어느 인게임 인스턴스로 보낼지 마스터에게 묻는다.
+  rpc RequestIngameAssignment(IngameAssignmentRequest) returns (IngameAssignmentResponse);
+}
+
+enum ServerType {
+  SERVER_TYPE_UNSPECIFIED = 0;
+  LOBBY = 1;
+  INGAME = 2;
+}
+
+// === 메인 서버 -> 마스터 ===
+
+message MainServerMessage {
+  oneof payload {
+    MainServerHeartbeat heartbeat = 1; // 주기적 생존 신호. 내용 없이 수신 자체가 신호다.
+    MainServerStatus status = 2;       // 상태 보고. 부하/수용량 변경이 있을 때 별도 전송.
+    // 추후 다른 종류의 보고/요청을 여기 추가한다 (예: ShutdownNotice).
+  }
+}
+
+// 내용 없이 메시지가 왔다는 사실 자체가 생존 신호다.
+message MainServerHeartbeat {}
+
+message MainServerStatus {
+  string instance_id = 1;
+  ServerType server_type = 2;
+  string address = 3;
+  int32 current_load = 4;   // 로비: 대기 중인 유저 수 / 인게임: 현재 활성 매치 수
+  int32 capacity = 5;       // 수용 가능한 최대치
+  int64 timestamp_unix_ms = 6;
+}
+
+// === 마스터 -> 메인 서버 ===
+
+message MasterMessage {
+  oneof payload {
+    MasterHeartbeat heartbeat = 1; // idle heartbeat 패턴: 업무 메시지가 없을 때만 전송.
+                                    // 어떤 종류든 메시지 수신 자체가 생존 신호이므로,
+                                    // 이 메시지가 오면 타임아웃 카운터가 리셋된다.
+    MasterCommand command = 2;
+  }
+}
+
+// 내용 없이 메시지가 왔다는 사실 자체가 신호다.
+message MasterHeartbeat {}
+
+message MasterCommand {
+  oneof command {
+    BroadcastRelay broadcast = 1;
+    DrainSignal drain = 2;
+  }
+}
+
+// 운영 공지(서버 점검 등)를 RabbitMQ fanout에서 받아 마스터가 이 채널로 그대로 중계한다.
+message BroadcastRelay {
+  string message = 1;
+  int64 expires_at_unix_ms = 2;
+}
+
+// 배포 드레인 등을 위해 신규 수용을 멈추라는 신호.
+message DrainSignal {
+  bool stop_accepting_new = 1;
+}
+
+message IngameAssignmentRequest {
+  string requesting_lobby_instance_id = 1;
+  int32 party_size = 2;
+}
+
+message IngameAssignmentResponse {
+  string ingame_instance_id = 1;
+  string address = 2;
+}

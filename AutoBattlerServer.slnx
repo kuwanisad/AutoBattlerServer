@@ -1,1 +1,5 @@
-<Solution />
+<Solution>
+  <Project Path="../../../Downloads/GameServer/LobbyServer/LobbyServer.csproj" />
+  <Project Path="../../../Downloads/GameServer/MasterServer/MasterServer.csproj" />
+  <Project Path="../../../Downloads/GameServer/Shared/MasterServer.Contracts/MasterServer.Contracts.csproj" />
+</Solution>
