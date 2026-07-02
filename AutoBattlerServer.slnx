@@ -1,5 +1,7 @@
 <Solution>
-  <Project Path="../../../Downloads/GameServer/LobbyServer/LobbyServer.csproj" />
-  <Project Path="../../../Downloads/GameServer/MasterServer/MasterServer.csproj" />
-  <Project Path="../../../Downloads/GameServer/Shared/MasterServer.Contracts/MasterServer.Contracts.csproj" />
+  <Project Path="GameServer/LobbyServer/LobbyServer.csproj" />
+  <Project Path="GameServer/MasterServer/MasterServer.csproj" />
+  <Project Path="GameServer/Shared/MainServer.Common/MainServer.Common.csproj" />
+  <Project Path="GameServer/Shared/MasterServer.Contracts/MasterServer.Contracts.csproj" />
+  <Project Path="GameServer/Shared/SubServer.Common/SubServer.Common.csproj" />
 </Solution>
