@@ -17,14 +17,14 @@ namespace SubServer.Common.Messaging;
 public abstract class RabbitMqConsumerBase : BackgroundService
 {
     private readonly RabbitMqConsumerOptions _options;
-    private readonly ILogger _logger;
+    protected readonly ILogger Logger;
 
     protected RabbitMqConsumerBase(
         IOptions<RabbitMqConsumerOptions> options,
         ILogger logger)
     {
         _options = options.Value;
-        _logger = logger;
+        Logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -41,7 +41,7 @@ public abstract class RabbitMqConsumerBase : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "RabbitMQ 연결 오류. 5초 후 재시도합니다.");
+                Logger.LogError(ex, "RabbitMQ 연결 오류. 5초 후 재시도합니다.");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
@@ -86,14 +86,14 @@ public abstract class RabbitMqConsumerBase : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "메시지 처리 실패. Queue={Queue} DeliveryTag={Tag}",
+                Logger.LogError(ex, "메시지 처리 실패. Queue={Queue} DeliveryTag={Tag}",
                     _options.QueueName, ea.DeliveryTag);
                 channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: false);
             }
         };
 
         channel.BasicConsume(_options.QueueName, autoAck: false, consumer: consumer);
-        _logger.LogInformation("RabbitMQ 구독 시작: Queue={Queue}", _options.QueueName);
+        Logger.LogInformation("RabbitMQ 구독 시작: Queue={Queue}", _options.QueueName);
 
         await Task.Delay(Timeout.Infinite, stoppingToken);
     }

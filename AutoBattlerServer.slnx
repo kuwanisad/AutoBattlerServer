@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="GameServer/DummySubServer/DummySubServer.csproj" />
   <Project Path="GameServer/LobbyServer/LobbyServer.csproj" />
   <Project Path="GameServer/MasterServer/MasterServer.csproj" />
   <Project Path="GameServer/Shared/MainServer.Common/MainServer.Common.csproj" />

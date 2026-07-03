@@ -17,4 +17,11 @@ public sealed class KafkaConsumerOptions
 
     /// <summary>"earliest": 처음부터, "latest": 연결 이후부터.</summary>
     public string AutoOffsetReset { get; set; } = "earliest";
+
+    /// <summary>
+    /// 메시지 폴링 주기. 하위 서버마다 실시간성 중요도가 다를 수 있어 설정으로 뺐다.
+    /// 실시간성이 중요한 서버는 낮게(예: 10ms), 배치성 처리는 높게(예: 500ms) 설정한다.
+    /// 기본값 100ms는 대부분의 경우에 적절한 균형점이다.
+    /// </summary>
+    public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(100);
 }

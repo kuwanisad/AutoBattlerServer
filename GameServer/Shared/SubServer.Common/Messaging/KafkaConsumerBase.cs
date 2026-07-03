@@ -27,6 +27,9 @@ public abstract class KafkaConsumerBase<TKey, TValue> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // consumer.Consume()이 동기 블로킹이라 첫 await 전까지 다음 BackgroundService 시작이 막힌다.
+        // Task.Yield()로 즉시 제어권을 반환해서 다른 서비스(RabbitMQ 등)가 먼저 시작될 수 있게 한다.
+        await Task.Yield();
         var config = new ConsumerConfig
         {
             BootstrapServers = _options.BootstrapServers,
@@ -53,10 +56,10 @@ public abstract class KafkaConsumerBase<TKey, TValue> : BackgroundService
                 ConsumeResult<TKey, TValue>? result = null;
                 try
                 {
-                    result = consumer.Consume(TimeSpan.FromMilliseconds(100));
+                    result = consumer.Consume(_options.PollInterval);
                     if (result is null) continue;
 
-                    _logger.LogDebug("메시지 수신: Topic={Topic} Partition={Partition} Offset={Offset}",
+                    _logger.LogInformation("메시지 수신: Topic={Topic} Partition={Partition} Offset={Offset}",
                         result.Topic, result.Partition, result.Offset);
 
                     await HandleMessageAsync(result, stoppingToken);

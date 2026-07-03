@@ -1,0 +1,12 @@
+{
+  "Kafka": {
+    "BootstrapServers": "localhost:9092"
+  },
+  "RabbitMQ": {
+    "Host": "localhost",
+    "Port": 5672,
+    "UserName": "guest",
+    "Password": "guest",
+    "VirtualHost": "/"
+  }
+}
