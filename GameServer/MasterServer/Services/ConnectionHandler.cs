@@ -166,12 +166,10 @@ internal sealed class ConnectionHandler
         {
             var queueReader = pendingInfo.OutboundQueue.Reader;
 
-            // 연결 직후 첫 keepalive를 즉시 보낸다. PeriodicTimer는 첫 tick도
-            // interval만큼 기다리기 때문에, 타이머만 믿으면 연결 후 침묵 구간이 생긴다.
+            // 연결 직후 첫 keepalive를 즉시 보낸다.
             await responseStream.WriteAsync(MakeHeartbeat(), cancellationToken);
 
-            using var keepaliveTimer = new PeriodicTimer(ConnectionConstants.KeepaliveInterval);
-            var timerTask = keepaliveTimer.WaitForNextTickAsync(cancellationToken).AsTask();
+            var timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
             var queueTask = queueReader.WaitToReadAsync(cancellationToken).AsTask();
 
             while (true)
@@ -180,12 +178,12 @@ internal sealed class ConnectionHandler
 
                 if (completed == timerTask)
                 {
-                    if (!await timerTask) return;
+                    if (cancellationToken.IsCancellationRequested) return;
 
                     // KeepaliveInterval 동안 보낼 업무 메시지가 없었던 경우에만 keepalive 전송
                     await responseStream.WriteAsync(MakeHeartbeat(), cancellationToken);
 
-                    timerTask = keepaliveTimer.WaitForNextTickAsync(cancellationToken).AsTask();
+                    timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
                 }
                 else
                 {
@@ -197,10 +195,7 @@ internal sealed class ConnectionHandler
                     }
 
                     // 업무 메시지를 보냈으니 타이머를 리셋한다.
-                    // PeriodicTimer.Period를 같은 값으로 재설정하면 내부 카운터가 리셋된다.
-                    keepaliveTimer.Period = ConnectionConstants.KeepaliveInterval;
-                    timerTask = keepaliveTimer.WaitForNextTickAsync(cancellationToken).AsTask();
-
+                    timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
                     queueTask = queueReader.WaitToReadAsync(cancellationToken).AsTask();
                 }
             }

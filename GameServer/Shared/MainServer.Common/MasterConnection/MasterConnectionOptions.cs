@@ -1,3 +1,5 @@
+using MasterServer;
+
 namespace MainServer.Common.MasterConnection;
 
 /// <summary>마스터 서버 접속 관련 설정. appsettings.json의 "MasterConnection" 섹션에 매핑된다.</summary>
@@ -8,15 +10,17 @@ public sealed class MasterConnectionOptions
     /// <summary>마스터 서버 gRPC 엔드포인트 (예: http://localhost:5100).</summary>
     public string MasterAddress { get; set; } = "http://localhost:5100";
 
-    /// <summary>
-    /// 이 메인 서버 인스턴스의 고유 식별자.
-    /// </summary>
+    /// <summary>이 메인 서버 인스턴스의 고유 식별자.</summary>
     public string InstanceId { get; set; } = Guid.NewGuid().ToString("N");
 
-    /// <summary>
-    /// 게임 클라이언트(또는 다른 서버)가 이 인스턴스에 접속할 주소.
-    /// </summary>
+    /// <summary>게임 클라이언트(또는 다른 서버)가 이 인스턴스에 접속할 주소.</summary>
     public string SelfAddress { get; set; } = "localhost:5200";
+
+    /// <summary>
+    /// 이 인스턴스의 서버 타입. 로비 서버면 Lobby, 인게임 서버면 Ingame.
+    /// 하드코딩하지 않고 옵션으로 빼서 MainServer.Common을 로비/인게임 모두 재사용한다.
+    /// </summary>
+    public ServerType ServerType { get; set; } = ServerType.Lobby;
 
     /// <summary>하트비트(상태 보고) 전송 주기.</summary>
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);

@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+option csharp_namespace = "IngameServer";
+
+// 게임 서버(Unity NGO)와 게임 에이전트(.NET 8) 간 양방향 스트림.
+// 게임 에이전트가 gRPC 서버, 게임 서버가 gRPC 클라이언트다.
+//
+// 설계 원칙:
+// - 어떤 메시지든 수신 자체가 생존 신호 (idle heartbeat 패턴)
+// - 게임 에이전트는 게임 서버로부터 확인을 받은 후에만 마스터에 보고한다
+// - 하트비트는 양방향으로 주고받는다
+
+service IngameControl {
+  // 게임 서버가 게임 에이전트에 연결하는 양방향 스트림.
+  // 연결 자체가 "게임 서버가 살아있다"는 신호다.
+  rpc Connect(stream GameServerMessage) returns (stream GameAgentMessage);
+}
+
+// === 게임 서버 → 게임 에이전트 ===
+
+message GameServerMessage {
+  oneof payload {
+    GameServerHeartbeat heartbeat = 1;   // 생존 신호
+    GameServerStatus status = 2;         // 부하/수용량 상태 보고
+    ServerReady ready = 3;               // 게임 서버 준비 완료
+    RoomOpened room_opened = 4;          // 방 열기 완료 확인
+    MatchResult match_result = 5;        // 매치 결과
+    PlayerJoined player_joined = 6;      // 플레이어 접속
+    PlayerLeft player_left = 7;          // 플레이어 퇴장
+  }
+}
+
+// 내용 없이 메시지가 왔다는 사실 자체가 생존 신호다.
+message GameServerHeartbeat {}
+
+message GameServerStatus {
+  int32 current_load = 1;   // 현재 활성 매치 수
+  int32 capacity = 2;       // 수용 가능한 최대 매치 수
+  int64 timestamp_unix_ms = 3;
+}
+
+// 게임 서버가 완전히 준비됐음을 알린다.
+// 게임 에이전트는 이 메시지를 받은 후에만 마스터에 "준비 완료"를 보고한다.
+message ServerReady {
+  int32 capacity = 1;       // 수용 가능한 최대 매치 수
+  int64 timestamp_unix_ms = 2;
+}
+
+// 게임 에이전트의 OpenRoom 요청에 대한 확인 응답.
+// 게임 에이전트는 이 메시지를 받은 후에만 마스터에 "방 열었다"고 보고한다.
+message RoomOpened {
+  string room_id = 1;
+  bool success = 2;
+  string error_message = 3;  // success = false인 경우 원인
+}
+
+message MatchResult {
+  string match_id = 1;
+  repeated PlayerMatchResult players = 2;
+  int64 started_at_unix_ms = 3;
+  int64 finished_at_unix_ms = 4;
+}
+
+message PlayerMatchResult {
+  string player_id = 1;
+  int32 rank = 2;
+  bool is_winner = 3;
+  int32 score_earned = 4;
+}
+
+message PlayerJoined {
+  string player_id = 1;
+  string room_id = 2;
+  int64 timestamp_unix_ms = 3;
+}
+
+message PlayerLeft {
+  string player_id = 1;
+  string room_id = 2;
+  int64 timestamp_unix_ms = 3;
+}
+
+// === 게임 에이전트 → 게임 서버 ===
+
+message GameAgentMessage {
+  oneof payload {
+    GameAgentHeartbeat heartbeat = 1;  // 생존 신호
+    OpenRoom open_room = 2;            // 방 열기 요청
+    DrainSignal drain = 3;             // 마스터의 드레인 신호 릴레이
+  }
+}
+
+// 내용 없이 메시지가 왔다는 사실 자체가 생존 신호다.
+message GameAgentHeartbeat {}
+
+// 마스터가 매치를 배정했을 때 게임 에이전트가 게임 서버에 방을 열라고 요청한다.
+// 게임 서버는 방을 열고 RoomOpened로 응답해야 한다.
+// 게임 에이전트는 RoomOpened를 받기 전까지 마스터에 완료 보고를 하지 않는다.
+message OpenRoom {
+  string room_id = 1;             // 마스터가 배정한 방 ID
+  repeated string player_ids = 2; // 입장할 플레이어 목록
+  int64 timestamp_unix_ms = 3;
+}
+
+// 마스터의 드레인 신호를 게임 서버에 릴레이한다.
+// 게임 서버는 진행 중인 매치를 마무리하고 신규 매치를 받지 않아야 한다.
+message DrainSignal {
+  bool stop_accepting_new = 1;
+}

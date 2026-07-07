@@ -16,10 +16,18 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.Configure<MasterConnectionOptions>(
     builder.Configuration.GetSection(MasterConnectionOptions.SectionName));
-builder.Services.AddHostedService<MasterConnectionService>();
+builder.Services.AddSingleton<MasterConnectionService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionService>());
 builder.Services.AddMainServerMessaging(builder.Configuration);
 
 var app = builder.Build();
+
+// 로비 서버는 시작하자마자 개방 - 인게임 서버와 달리 별도 준비 단계가 없다.
+var masterConnection = app.Services.GetRequiredService<MasterConnectionService>();
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    masterConnection.UpdateStatus(currentLoad: 0, capacity: 100); // TODO: 실제 수용량으로 교체
+});
 
 app.MapGet("/", () => "Lobby Server.");
 

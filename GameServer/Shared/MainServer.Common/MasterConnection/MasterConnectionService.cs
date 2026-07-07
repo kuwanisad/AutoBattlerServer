@@ -43,6 +43,21 @@ public sealed class MasterConnectionService : BackgroundService
     /// </summary>
     public void EnqueueMessage(MainServerMessage message) => _outboundQueue.Writer.TryWrite(message);
 
+    /// <summary>
+    /// 현재 부하와 수용량을 업데이트하고 마스터에 즉시 상태 보고를 보낸다.
+    /// 인게임 서버가 준비 완료되면 Capacity를 실제값으로 올려서 마스터가 배정을 시작하게 한다.
+    /// Capacity = 0이면 마스터가 이 서버로 플레이어를 배정하지 않는다.
+    /// </summary>
+    public void UpdateStatus(int currentLoad, int capacity)
+    {
+        _currentLoad = currentLoad;
+        _capacity = capacity;
+        EnqueueMessage(MakeStatus());
+    }
+
+    private volatile int _currentLoad;
+    private volatile int _capacity;
+
     private static MainServerMessage MakeHeartbeat() => new()
     {
         Heartbeat = new MainServerHeartbeat(),
@@ -53,10 +68,10 @@ public sealed class MasterConnectionService : BackgroundService
         Status = new MainServerStatus
         {
             InstanceId = _options.InstanceId,
-            ServerType = ServerType.Lobby,
+            ServerType = _options.ServerType,
             Address = _options.SelfAddress,
-            CurrentLoad = 0,    // TODO: 실제 매칭 대기열 인원수로 교체
-            Capacity = 100,     // TODO: 실제 수용 가능 인원으로 교체
+            CurrentLoad = _currentLoad,
+            Capacity = _capacity,
             TimestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         },
     };
@@ -142,8 +157,7 @@ public sealed class MasterConnectionService : BackgroundService
             // 연결 직후 상태 보고를 보내 서버가 이 인스턴스를 즉시 등록할 수 있게 한다.
             await requestStream.WriteAsync(MakeStatus(), stoppingToken);
 
-            using var heartbeatTimer = new PeriodicTimer(_options.HeartbeatInterval);
-            var timerTask = heartbeatTimer.WaitForNextTickAsync(stoppingToken).AsTask();
+            var timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
             var queueTask = _outboundQueue.Reader.WaitToReadAsync(stoppingToken).AsTask();
 
             while (true)
@@ -152,12 +166,12 @@ public sealed class MasterConnectionService : BackgroundService
 
                 if (completed == timerTask)
                 {
-                    if (!await timerTask) break;
+                    if (stoppingToken.IsCancellationRequested) break;
 
                     await requestStream.WriteAsync(MakeHeartbeat(), stoppingToken);
                     _logger.LogInformation("하트비트 송신");
 
-                    timerTask = heartbeatTimer.WaitForNextTickAsync(stoppingToken).AsTask();
+                    timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
                 }
                 else
                 {
@@ -168,8 +182,8 @@ public sealed class MasterConnectionService : BackgroundService
                         await requestStream.WriteAsync(queued, stoppingToken);
                     }
 
-                    heartbeatTimer.Period = _options.HeartbeatInterval;
-                    timerTask = heartbeatTimer.WaitForNextTickAsync(stoppingToken).AsTask();
+                    // 업무 메시지를 보냈으니 타이머를 리셋한다.
+                    timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
                     queueTask = _outboundQueue.Reader.WaitToReadAsync(stoppingToken).AsTask();
                 }
             }
