@@ -15,6 +15,13 @@
     </PackageReference>
   </ItemGroup>
 
+	<Target Name="CopyGeneratedToUnity" AfterTargets="Build">
+		<Copy
+		  SourceFiles="$(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\Ingame.cs;
+                 $(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\IngameGrpc.cs"
+		  DestinationFolder="C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Server\Generated" />
+	</Target>
+	
   <ItemGroup>
     <Protobuf Include="Protos\ingame.proto" GrpcServices="Both" />
   </ItemGroup>
