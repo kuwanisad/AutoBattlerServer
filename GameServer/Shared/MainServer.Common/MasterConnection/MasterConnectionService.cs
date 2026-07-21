@@ -169,7 +169,6 @@ public sealed class MasterConnectionService : BackgroundService
                     if (stoppingToken.IsCancellationRequested) break;
 
                     await requestStream.WriteAsync(MakeHeartbeat(), stoppingToken);
-                    _logger.LogInformation("하트비트 송신");
 
                     timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
                 }

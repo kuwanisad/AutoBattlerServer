@@ -138,8 +138,30 @@ Copy-Item "$nativeSrc\*" $unityNative
 ```
 C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Server\Generated
 ```
-다른 환경에서 작업 시 `IngameServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
-실제 환경에 맞게 수정해야 한다.
+빌드 시 `ingame.proto`에서 생성된 `Ingame.cs`, `IngameGrpc.cs` 두 파일이
+`Assets\Scripts\Server\Generated\`로 자동 복사된다.
+새 환경에서는 `IngameServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
+실제 환경에 맞게 수정할 것.
+
+---
+
+## LobbyServer.Contracts 빌드 → Unity 자동 복사
+
+`LobbyServer.Contracts.csproj`에 빌드 후 이벤트가 설정되어 있어
+빌드 시 생성된 `Lobby.cs`, `LobbyGrpc.cs`가 자동으로 Unity로 복사된다.
+
+```
+복사 대상: Assets\Scripts\Client\Generated\
+```
+
+**주의**: 복사 경로가 하드코딩되어 있다.
+```
+C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Client\Generated
+```
+빌드 시 `lobby.proto`에서 생성된 `Lobby.cs`, `LobbyGrpc.cs` 두 파일이
+`Assets\Scripts\Client\Generated\`로 자동 복사된다.
+새 환경에서는 `LobbyServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
+실제 환경에 맞게 수정할 것.
 
 ---
 
@@ -174,11 +196,8 @@ Kafka/RabbitMQ 연결 정보를 담은 공유 설정 파일.
 
 ## 주의사항
 
-- `IngameServer.Contracts.csproj`의 Unity 복사 경로는 절대 경로가 하드코딩되어 있다.
-  빌드 시 `ingame.proto`에서 생성된 `Ingame.cs`, `IngameGrpc.cs` 두 파일이
-  `Assets\Scripts\Server\Generated\`로 자동 복사된다.
-  새 환경에서는 `IngameServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
-  실제 환경에 맞게 수정할 것.
+- `IngameServer.Contracts.csproj`와 `LobbyServer.Contracts.csproj`의 Unity 복사 경로는
+  절대 경로가 하드코딩되어 있다. 새 환경에서는 반드시 경로를 수정할 것.
 - Unity Plugins 폴더의 DLL들은 Git에 포함되어 있지 않다.
   새 환경에서는 위 지침대로 수동 설치해야 한다.
 - `System.Runtime` 버전 충돌 주의: .NET 8 기반 DLL을 Unity Plugins에 넣으면

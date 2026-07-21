@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+option csharp_namespace = "LobbyServer";
+
+// 클라이언트와 로비 서버 간 gRPC 계약.
+// 현업 패턴에 따라 용도별로 RPC 타입을 분리한다.
+// - 단항 RPC: 요청/응답이 명확한 것 (로그인, 계정 생성 등)
+// - 서버 스트리밍: 서버가 지속적으로 상태를 밀어주는 것 (매치메이킹)
+//
+// 인증: Login/CreateAccount를 제외한 모든 RPC는 gRPC 메타데이터에
+// "authorization: Bearer {JWT}" 를 포함해야 한다.
+// AuthInterceptor가 자동으로 검증한다.
+
+service LobbyControl {
+  // === 인증 (토큰 불필요) ===
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+
+  // === 세션 (토큰 필요) ===
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // === 매치메이킹 (토큰 필요) ===
+  // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
+  // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
+  rpc RequestMatch(MatchRequest) returns (stream MatchEvent);
+  rpc CancelMatch(CancelMatchRequest) returns (CancelMatchResponse);
+}
+
+// === 인증 ===
+
+message LoginRequest {
+  string player_id = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string token = 2;           // JWT 토큰. 이후 모든 요청의 메타데이터에 포함
+  string error_message = 3;   // success = false인 경우 원인
+                               // 예: "ID를 찾을 수 없습니다", "비밀번호가 틀렸습니다"
+}
+
+message CreateAccountRequest {
+  string player_id = 1;
+  string password = 2;
+  string nickname = 3;
+}
+
+message CreateAccountResponse {
+  bool success = 1;
+  string token = 2;           // 계정 생성 성공 시 바로 JWT 발급
+  string error_message = 3;   // 예: "이미 존재하는 ID", "이미 사용 중인 닉네임"
+}
+
+// === 세션 ===
+
+message LogoutRequest {}
+
+message LogoutResponse {
+  bool success = 1;
+}
+
+// === 매치메이킹 ===
+
+message MatchRequest {
+  // 추후 모드, 티어 등 매치 조건 추가 예정
+}
+
+message MatchEvent {
+  oneof payload {
+    MatchQueued queued = 1;       // 대기열 진입 확인
+    MatchStatusUpdate status = 2; // 대기 중 상태 업데이트 (대기열 순위 등)
+    MatchFound match_found = 3;   // 매치 확정 - 이후 스트림이 닫힘
+    MatchFailed match_failed = 4; // 매치 실패 (서버 오류 등)
+  }
+}
+
+message MatchQueued {
+  int32 queue_position = 1;         // 현재 대기열 순위
+  int64 estimated_wait_ms = 2;      // 예상 대기 시간 (ms)
+}
+
+message MatchStatusUpdate {
+  int32 queue_position = 1;
+  int64 estimated_wait_ms = 2;
+}
+
+message MatchFound {
+  string match_id = 1;
+  string game_server_address = 2;   // 클라이언트가 NGO로 접속할 주소 (host:port)
+  repeated string player_ids = 3;   // 같은 매치의 플레이어 목록
+  int64 timestamp_unix_ms = 4;
+}
+
+message MatchFailed {
+  string reason = 1;
+}
+
+message CancelMatchRequest {}
+
+message CancelMatchResponse {
+  bool success = 1;
+}
