@@ -20,13 +20,14 @@ service IngameControl {
 
 message GameServerMessage {
   oneof payload {
-    GameServerHeartbeat heartbeat = 1;   // 생존 신호
-    GameServerStatus status = 2;         // 부하/수용량 상태 보고
-    ServerReady ready = 3;               // 게임 서버 준비 완료
-    RoomOpened room_opened = 4;          // 방 열기 완료 확인
-    MatchResult match_result = 5;        // 매치 결과
-    PlayerJoined player_joined = 6;      // 플레이어 접속
-    PlayerLeft player_left = 7;          // 플레이어 퇴장
+    GameServerHeartbeat heartbeat = 1;              // 생존 신호
+    GameServerStatus status = 2;                    // 부하/수용량 상태 보고
+    ServerReady ready = 3;                          // 게임 서버 준비 완료
+    RoomOpened room_opened = 4;                     // 방 열기 완료 확인
+    MatchResult match_result = 5;                   // 매치 결과
+    PlayerJoined player_joined = 6;                 // 플레이어 접속
+    PlayerLeft player_left = 7;                     // 플레이어 퇴장
+    ApprovalRequest approval_request = 8;           // ConnectionApproval 검증 요청
   }
 }
 
@@ -80,6 +81,14 @@ message PlayerLeft {
   int64 timestamp_unix_ms = 3;
 }
 
+// NGO ConnectionApproval 시 게임 서버가 게임 에이전트에 검증을 요청한다.
+// 게임 에이전트가 Redis에서 세션 조회 + matchToken 검증 후 ApprovalResponse로 응답한다.
+message ApprovalRequest {
+  uint64 client_id = 1;      // NGO 클라이언트 ID
+  string player_id = 2;     // 클라이언트가 주장하는 플레이어 ID
+  string match_token = 3;   // 일회용 매치 토큰
+}
+
 // === 게임 에이전트 → 게임 서버 ===
 
 message GameAgentMessage {
@@ -87,6 +96,7 @@ message GameAgentMessage {
     GameAgentHeartbeat heartbeat = 1;  // 생존 신호
     OpenRoom open_room = 2;            // 방 열기 요청
     DrainSignal drain = 3;             // 마스터의 드레인 신호 릴레이
+    ApprovalResponse approval_response = 4;  // ConnectionApproval 검증 응답
   }
 }
 
@@ -106,4 +116,13 @@ message OpenRoom {
 // 게임 서버는 진행 중인 매치를 마무리하고 신규 매치를 받지 않아야 한다.
 message DrainSignal {
   bool stop_accepting_new = 1;
+}
+
+// ApprovalRequest에 대한 게임 에이전트의 검증 결과.
+// approved = true면 게임 서버가 NGO 접속을 승인한다.
+message ApprovalResponse {
+  uint64 client_id = 1;      // 어떤 클라이언트에 대한 응답인지
+  string player_id = 2;     // 검증된 플레이어 ID
+  bool approved = 3;        // 승인 여부
+  string reason = 4;        // approved = false인 경우 거부 사유
 }

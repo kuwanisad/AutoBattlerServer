@@ -165,6 +165,26 @@ C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Client\Generated
 
 ---
 
+## ChatServer.Contracts 빌드 → Unity 자동 복사
+
+`ChatServer.Contracts.csproj`에 빌드 후 이벤트가 설정되어 있어
+빌드 시 생성된 `Chat.cs`, `ChatGrpc.cs`가 자동으로 Unity로 복사된다.
+
+```
+복사 대상: Assets\Scripts\Client\Generated\
+```
+
+**주의**: 복사 경로가 하드코딩되어 있다.
+```
+C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Client\Generated
+```
+빌드 시 `chat.proto`에서 생성된 `Chat.cs`, `ChatGrpc.cs` 두 파일이
+`Assets\Scripts\Client\Generated\`로 자동 복사된다.
+새 환경에서는 `ChatServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
+실제 환경에 맞게 수정할 것.
+
+---
+
 ## Docker 컨테이너
 
 DevTools 폴더의 `docker-compose.yml`로 관리한다.
@@ -179,6 +199,7 @@ docker-compose down     # 종료
 |--------|--------|------|
 | kafka | confluentinc/cp-kafka:latest | 9092 |
 | rabbitmq | rabbitmq:4-management | 5672, 15672 |
+| redis | redis:7-alpine | 6379 |
 
 RabbitMQ 관리 콘솔: `http://localhost:15672` (guest/guest)
 
@@ -186,18 +207,17 @@ RabbitMQ 관리 콘솔: `http://localhost:15672` (guest/guest)
 
 ## shared.appsettings.json
 
-Kafka/RabbitMQ 연결 정보를 담은 공유 설정 파일.
+Kafka/RabbitMQ/Redis 연결 정보를 담은 공유 설정 파일.
 위치: `GameServer/Shared/shared.appsettings.json`
 
 각 서버 프로젝트 `csproj`에 빌드 시 출력 폴더로 자동 복사되는 설정이 있다.
-자세한 내용은 `GameServer/Shared/README.md` 참고.
 
 ---
 
 ## 주의사항
 
-- `IngameServer.Contracts.csproj`와 `LobbyServer.Contracts.csproj`의 Unity 복사 경로는
-  절대 경로가 하드코딩되어 있다. 새 환경에서는 반드시 경로를 수정할 것.
+- `IngameServer.Contracts.csproj`, `LobbyServer.Contracts.csproj`, `ChatServer.Contracts.csproj`의
+  Unity 복사 경로는 절대 경로가 하드코딩되어 있다. 새 환경에서는 반드시 경로를 수정할 것.
 - Unity Plugins 폴더의 DLL들은 Git에 포함되어 있지 않다.
   새 환경에서는 위 지침대로 수동 설치해야 한다.
 - `System.Runtime` 버전 충돌 주의: .NET 8 기반 DLL을 Unity Plugins에 넣으면

@@ -20,6 +20,7 @@ enum ServerType {
   SERVER_TYPE_UNSPECIFIED = 0;
   LOBBY = 1;
   INGAME = 2;
+  CHAT = 3;
 }
 
 // === 메인 서버 -> 마스터 ===

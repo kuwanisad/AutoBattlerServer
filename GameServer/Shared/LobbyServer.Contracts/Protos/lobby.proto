@@ -90,6 +90,7 @@ message MatchFound {
   string game_server_address = 2;   // 클라이언트가 NGO로 접속할 주소 (host:port)
   repeated string player_ids = 3;   // 같은 매치의 플레이어 목록
   int64 timestamp_unix_ms = 4;
+  string match_token = 5;           // 일회용 매치 토큰. NGO ConnectionApproval 시 사용
 }
 
 message MatchFailed {

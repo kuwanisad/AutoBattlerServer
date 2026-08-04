@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+option csharp_namespace = "ChatContracts";
+
+// 채팅 서버와 마스터 서버 간 gRPC 계약 + WebSocket 메시지 타입.
+// 채팅 서버는 마스터 서버에 등록하고 상태를 보고한다.
+// 클라이언트와의 통신은 WebSocket + Protobuf 바이너리로 처리한다.
+// 로비/인게임 서버는 채팅 서버의 존재를 몰라도 된다.
+// 채팅 권한은 Redis에 기록되고 채팅 서버가 직접 조회한다.
+//
+// 브로커 발행:
+// - Kafka: 욕설/스팸 감지 이벤트, 채팅 로그 (분석용)
+// - RabbitMQ: 신고 처리 work queue
+
+service ChatMasterControl {
+  // 채팅 서버 ↔ 마스터 서버 양방향 스트림.
+  // 마스터에 등록하고 하트비트를 주고받는다.
+  rpc Connect(stream ChatServerMessage) returns (stream MasterChatMessage);
+}
+
+// === 채팅 서버 → 마스터 서버 ===
+
+message ChatServerMessage {
+  oneof payload {
+    ChatServerHeartbeat heartbeat = 1;
+    ChatServerStatus status = 2;
+    ChatServerReady ready = 3;
+  }
+}
+
+message ChatServerHeartbeat {}
+
+message ChatServerStatus {
+  int32 current_connections = 1;
+  int32 capacity = 2;
+  int64 timestamp_unix_ms = 3;
+}
+
+message ChatServerReady {
+  int32 capacity = 1;
+  string websocket_address = 2;
+  int64 timestamp_unix_ms = 3;
+}
+
+// === 마스터 서버 → 채팅 서버 ===
+
+message MasterChatMessage {
+  oneof payload {
+    MasterChatHeartbeat heartbeat = 1;
+    ChatDrainSignal drain = 2;
+  }
+}
+
+message MasterChatHeartbeat {}
+
+message ChatDrainSignal {
+  bool stop_accepting_new = 1;
+}
+
+// === WebSocket 메시지 (클라이언트 ↔ 채팅 서버) ===
+// WebSocket 프레임의 payload를 Protobuf 바이너리로 직렬화한다.
+
+// 클라이언트 → 채팅 서버
+message ClientChatMessage {
+  oneof payload {
+    JoinChannelRequest join = 1;    // 채널 입장
+    LeaveChannelRequest leave = 2;  // 채널 퇴장
+    SendMessageRequest send = 3;    // 메시지 전송
+  }
+}
+
+message JoinChannelRequest {
+  string channel_id = 1;
+}
+
+message LeaveChannelRequest {
+  string channel_id = 1;
+}
+
+message SendMessageRequest {
+  string channel_id = 1;
+  string content = 2;
+}
+
+// 채팅 서버 → 클라이언트
+message ServerChatMessage {
+  oneof payload {
+    ChatMessageDelivery message = 1;  // 수신된 채팅 메시지
+    JoinChannelAck join_ack = 2;      // 채널 입장 확인
+    LeaveChannelAck leave_ack = 3;    // 채널 퇴장 확인
+    ChatError error = 4;              // 에러 응답
+  }
+}
+
+message ChatMessageDelivery {
+  string message_id = 1;
+  string channel_id = 2;
+  string sender_id = 3;
+  string content = 4;
+  int64 timestamp_unix_ms = 5;
+}
+
+message JoinChannelAck {
+  string channel_id = 1;
+  bool success = 2;
+}
+
+message LeaveChannelAck {
+  string channel_id = 1;
+  bool success = 2;
+}
+
+message ChatError {
+  string code = 1;
+  string message = 2;
+}

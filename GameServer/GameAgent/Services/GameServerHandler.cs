@@ -2,6 +2,7 @@ using Grpc.Core;
 using IngameServer;
 using MainServer.Common.MasterConnection;
 using Microsoft.Extensions.Logging;
+using Shared.Common.Redis;
 
 namespace GameAgent.Services;
 
@@ -14,17 +15,21 @@ namespace GameAgent.Services;
 /// 2. 게임 서버가 ServerReady를 보내면 마스터 서버에 접속한다.
 /// 3. 마스터에서 OpenRoom이 오면 게임 서버에 릴레이한다.
 /// 4. 게임 서버가 RoomOpened를 보내면 마스터에 보고한다.
+/// 5. 게임 서버가 ApprovalRequest를 보내면 Redis에서 세션/토큰 검증 후 ApprovalResponse를 반환한다.
 /// </summary>
 public sealed class GameServerHandler
 {
     private readonly MasterConnectionService _masterConnection;
+    private readonly ISessionRegistry _sessionRegistry;
     private readonly ILogger<GameServerHandler> _logger;
 
     public GameServerHandler(
         MasterConnectionService masterConnection,
+        ISessionRegistry sessionRegistry,
         ILogger<GameServerHandler> logger)
     {
         _masterConnection = masterConnection;
+        _sessionRegistry = sessionRegistry;
         _logger = logger;
     }
 
@@ -55,7 +60,6 @@ public sealed class GameServerHandler
         {
             _logger.LogInformation("게임 서버 연결 종료");
 
-            // 게임 서버가 끊기면 마스터에 Capacity = 0으로 보고
             if (serverInfo.IsReady)
             {
                 _masterConnection.UpdateStatus(currentLoad: 0, capacity: 0);
@@ -94,7 +98,6 @@ public sealed class GameServerHandler
                 switch (message.PayloadCase)
                 {
                     case GameServerMessage.PayloadOneofCase.Heartbeat:
-                        // 생존 신호 - 타임아웃 카운터 리셋됨
                         break;
 
                     case GameServerMessage.PayloadOneofCase.Status:
@@ -114,11 +117,15 @@ public sealed class GameServerHandler
                         break;
 
                     case GameServerMessage.PayloadOneofCase.PlayerJoined:
-                        HandlePlayerJoined(message.PlayerJoined, serverInfo);
+                        await HandlePlayerJoinedAsync(message.PlayerJoined, serverInfo);
                         break;
 
                     case GameServerMessage.PayloadOneofCase.PlayerLeft:
-                        HandlePlayerLeft(message.PlayerLeft, serverInfo);
+                        await HandlePlayerLeftAsync(message.PlayerLeft, serverInfo);
+                        break;
+
+                    case GameServerMessage.PayloadOneofCase.ApprovalRequest:
+                        await HandleApprovalRequestAsync(message.ApprovalRequest, serverInfo);
                         break;
 
                     case GameServerMessage.PayloadOneofCase.None:
@@ -160,6 +167,7 @@ public sealed class GameServerHandler
 
                     while (serverInfo.OutboundQueue.Reader.TryRead(out var queued))
                     {
+                        _logger.LogInformation("메시지 전송: {Type}", queued.PayloadCase);
                         await responseStream.WriteAsync(queued, cancellationToken);
                     }
 
@@ -191,7 +199,6 @@ public sealed class GameServerHandler
 
         _logger.LogInformation("게임 서버 준비 완료. Capacity={Capacity}", ready.Capacity);
 
-        // 게임 서버가 준비됐으니 마스터에 접속 + Capacity 업데이트
         _masterConnection.UpdateStatus(currentLoad: 0, capacity: ready.Capacity);
         await Task.CompletedTask;
     }
@@ -201,37 +208,105 @@ public sealed class GameServerHandler
         if (roomOpened.Success)
         {
             _logger.LogInformation("방 열기 완료: RoomId={RoomId}", roomOpened.RoomId);
-            // TODO: 마스터에 방 열기 완료 보고
         }
         else
         {
             _logger.LogError("방 열기 실패: RoomId={RoomId} Error={Error}",
                 roomOpened.RoomId, roomOpened.ErrorMessage);
-            // TODO: 마스터에 실패 보고
         }
     }
 
     private async Task HandleMatchResultAsync(MatchResult result)
     {
         _logger.LogInformation("매치 결과 수신: MatchId={MatchId}", result.MatchId);
-        // TODO: Kafka에 매치 결과 발행, RabbitMQ로 보상 지급 요청
         await Task.CompletedTask;
     }
 
-    private void HandlePlayerJoined(PlayerJoined joined, GameServerInfo serverInfo)
+    private async Task HandleApprovalRequestAsync(ApprovalRequest request, GameServerInfo serverInfo)
+    {
+        _logger.LogInformation("접속 검증 요청: ClientId={ClientId} PlayerId={PlayerId}",
+            request.ClientId, request.PlayerId);
+
+        var response = new ApprovalResponse
+        {
+            ClientId = request.ClientId,
+            PlayerId = request.PlayerId,
+        };
+
+        var session = await _sessionRegistry.GetAsync(request.PlayerId);
+
+        if (session == null)
+        {
+            response.Approved = false;
+            response.Reason = "세션 없음";
+            _logger.LogWarning("접속 거부 - 세션 없음: PlayerId={PlayerId}", request.PlayerId);
+        }
+        else if (session.Status != PlayerStatus.Moving)
+        {
+            response.Approved = false;
+            response.Reason = $"잘못된 세션 상태: {session.Status}";
+            _logger.LogWarning("접속 거부 - 잘못된 상태: PlayerId={PlayerId} Status={Status}",
+                request.PlayerId, session.Status);
+        }
+        else if (session.MatchToken != request.MatchToken)
+        {
+            response.Approved = false;
+            response.Reason = "매치 토큰 불일치";
+            _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
+        }
+        else
+        {
+            response.Approved = true;
+            serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
+            _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
+                request.ClientId, request.PlayerId);
+        }
+
+        var written = serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
+        {
+            ApprovalResponse = response,
+        });
+    }
+
+    private async Task HandlePlayerJoinedAsync(PlayerJoined joined, GameServerInfo serverInfo)
     {
         serverInfo.CurrentLoad++;
         _masterConnection.UpdateStatus(serverInfo.CurrentLoad, serverInfo.Capacity);
         _logger.LogInformation("플레이어 접속: {PlayerId} ({Load}/{Capacity})",
             joined.PlayerId, serverInfo.CurrentLoad, serverInfo.Capacity);
+
+        var session = await _sessionRegistry.GetAsync(joined.PlayerId);
+        if (session != null)
+        {
+            session.Status = PlayerStatus.Ingame;
+            session.CurrentServer = joined.RoomId;
+            session.NextServer = string.Empty;
+            session.MatchToken = string.Empty;
+            await _sessionRegistry.UpdateAsync(joined.PlayerId, session);
+        }
+        else
+        {
+            _logger.LogWarning("세션 없는 플레이어 접속: {PlayerId}", joined.PlayerId);
+        }
     }
 
-    private void HandlePlayerLeft(PlayerLeft left, GameServerInfo serverInfo)
+    private async Task HandlePlayerLeftAsync(PlayerLeft left, GameServerInfo serverInfo)
     {
         serverInfo.CurrentLoad = Math.Max(0, serverInfo.CurrentLoad - 1);
         _masterConnection.UpdateStatus(serverInfo.CurrentLoad, serverInfo.Capacity);
         _logger.LogInformation("플레이어 퇴장: {PlayerId} ({Load}/{Capacity})",
             left.PlayerId, serverInfo.CurrentLoad, serverInfo.Capacity);
+
+        serverInfo.RemoveClientMapping(left.PlayerId);
+
+        var session = await _sessionRegistry.GetAsync(left.PlayerId);
+        if (session != null)
+        {
+            session.Status = PlayerStatus.Moving;
+            session.CurrentServer = string.Empty;
+            session.NextServer = "lobby";
+            await _sessionRegistry.UpdateAsync(left.PlayerId, session);
+        }
     }
 
     private static GameAgentMessage MakeHeartbeat() => new()

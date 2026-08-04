@@ -8,5 +8,8 @@
     "UserName": "guest",
     "Password": "guest",
     "VirtualHost": "/"
+  },
+  "Redis": {
+    "ConnectionString": "localhost:6379"
   }
 }

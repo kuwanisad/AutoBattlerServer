@@ -2,6 +2,7 @@ using GameAgent.Services;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,6 +28,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionSe
 
 builder.Services.AddMainServerMessaging(builder.Configuration);
 
+// Redis - Session Registry
+builder.Services.AddSessionRegistry(builder.Configuration);
+
 // GameServerHandler - 게임 서버 연결 처리
 builder.Services.AddSingleton<GameServerHandler>();
 builder.Services.AddScoped<IngameControlService>();
@@ -35,5 +39,10 @@ var app = builder.Build();
 
 app.MapGrpcService<IngameControlService>();
 app.MapGet("/", () => "Game Agent. 게임 서버(Unity)의 gRPC 접속을 기다리는 중입니다.");
+
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    app.Logger.LogInformation("게임 에이전트 시작 완료. 게임 서버(Unity) 연결 대기 중... (포트 7000)");
+});
 
 app.Run();
