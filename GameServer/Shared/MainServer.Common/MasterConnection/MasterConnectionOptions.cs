@@ -1,4 +1,5 @@
 using MasterServer;
+using GameServer.Common;
 
 namespace MainServer.Common.MasterConnection;
 
@@ -34,4 +35,10 @@ public sealed class MasterConnectionOptions
     /// <summary>접속이 끊겼을 때 재시도 간 최소/최대 대기 시간 (지수 백오프의 상하한).</summary>
     public TimeSpan ReconnectDelayMin { get; set; } = TimeSpan.FromSeconds(1);
     public TimeSpan ReconnectDelayMax { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>gRPC HTTP/2 KeepAlive ping 전송 주기.</summary>
+    public TimeSpan KeepAlivePingDelay { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>gRPC HTTP/2 KeepAlive ping 응답 타임아웃.</summary>
+    public TimeSpan KeepAlivePingTimeout { get; set; } = TimeSpan.FromSeconds(5);
 }

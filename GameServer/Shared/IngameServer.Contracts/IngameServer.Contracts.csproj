@@ -1,29 +1,29 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
-    <PackageReference Include="Google.Protobuf" Version="3.27.2" />
-    <PackageReference Include="Grpc.Tools" Version="2.63.0">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
+		<PackageReference Include="Google.Protobuf" Version="3.27.2" />
+		<PackageReference Include="Grpc.Tools" Version="2.63.0">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Protobuf Include="Protos\ingame.proto" GrpcServices="Both" />
+	</ItemGroup>
 
 	<Target Name="CopyGeneratedToUnity" AfterTargets="Build">
 		<Copy
 		  SourceFiles="$(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\Ingame.cs;
-                 $(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\IngameGrpc.cs"
-		  DestinationFolder="C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Server\Generated" />
+                   $(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\IngameGrpc.cs"
+		  DestinationFolder="$(UnityServerGeneratedPath)" />
 	</Target>
-	
-  <ItemGroup>
-    <Protobuf Include="Protos\ingame.proto" GrpcServices="Both" />
-  </ItemGroup>
 
 </Project>

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using GameServer.Common;
 
 namespace MasterServer.Registry;
 
@@ -6,7 +7,7 @@ namespace MasterServer.Registry;
 public sealed class InstanceInfo
 {
     public required string InstanceId { get; set; }
-    public required global::MasterServer.ServerType ServerType { get; set; }
+    public required ServerType ServerType { get; set; }
     public required string Address { get; set; }
     public int CurrentLoad { get; set; }
     public int Capacity { get; set; }

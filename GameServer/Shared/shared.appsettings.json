@@ -11,5 +11,8 @@
   },
   "Redis": {
     "ConnectionString": "localhost:6379"
+  },
+  "CleanupRegistry": {
+    "Address": "http://localhost:9000"
   }
 }

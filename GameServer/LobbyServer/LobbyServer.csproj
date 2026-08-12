@@ -8,20 +8,17 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Shared\MainServer.Common\MainServer.Common.csproj" />
-	<PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
-	<ProjectReference Include="..\Shared\LobbyServer.Contracts\LobbyServer.Contracts.csproj" />
-	<ProjectReference Include="..\Shared\Shared.Common\Shared.Common.csproj" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
+    <ProjectReference Include="..\Shared\LobbyServer.Contracts\LobbyServer.Contracts.csproj" />
+    <ProjectReference Include="..\Shared\Shared.Common\Shared.Common.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 공유 설정 파일을 빌드 출력 폴더로 자동 복사 -->
     <None Include="..\Shared\shared.appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <Target Name="CheckSharedConfig" BeforeTargets="Build">
-    <Error
-      Condition="!Exists('..\Shared\shared.appsettings.json')"
-      Text="shared.appsettings.json 파일이 없습니다. GameServer/Shared/ 폴더를 확인하세요." />
+    <Error Condition="!Exists('..\Shared\shared.appsettings.json')" Text="shared.appsettings.json 파일이 없습니다. GameServer/Shared/ 폴더를 확인하세요." />
   </Target>
-	
+
 </Project>

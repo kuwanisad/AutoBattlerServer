@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+import "common.proto";
+
+option csharp_namespace = "MatchingServer";
+
+// 매칭 서버와 로비/게임 에이전트 간 통신 계약.
+// 매칭 서버는 범용 라우팅/매칭 엔진으로 플레이어 풀과 서버 풀을 관리한다.
+//
+// 서비스:
+//   LobbyMatchControl  ← 로비 서버 ↔ 매칭 서버
+//   IngameMatchControl ← 게임 에이전트 ↔ 매칭 서버
+
+// =====================
+// 로비 서버 ↔ 매칭 서버
+// =====================
+
+service LobbyMatchControl {
+  // 로비 서버 → 매칭 서버: 플레이어 매칭 요청
+  rpc JoinMatch(JoinMatchRequest) returns (JoinMatchResponse);
+
+  // 로비 서버 → 매칭 서버: 플레이어 매칭 취소
+  rpc LeaveMatch(LeaveMatchRequest) returns (LeaveMatchResponse);
+
+  // 매칭 서버 → 로비 서버: 매칭 결과 통보
+  // MatchConfirmed 또는 MatchCancelled
+  rpc NotifyMatch(MatchNotification) returns (MatchNotificationResponse);
+}
+
+message JoinMatchRequest {
+  string player_id = 1;
+  string lobby_server_id = 2;  // 결과를 어느 로비에 통보할지
+  int32 skill_score = 3;       // 더미: 추후 실력 기반 매칭 구현 시 사용
+}
+
+message JoinMatchResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message LeaveMatchRequest {
+  string player_id = 1;
+}
+
+message LeaveMatchResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// 매칭 서버 → 로비 서버 결과 통보
+message MatchNotification {
+  oneof result {
+    MatchConfirmed confirmed = 1;
+    MatchCancelled cancelled = 2;
+  }
+}
+
+message MatchConfirmed {
+  string player_id = 1;
+  string ingame_server_id = 2;   // 접속할 게임 에이전트 ID (OwnerServerId 설정에 사용)
+  string ingame_address = 3;     // 클라가 접속할 게임 서버 주소
+}
+
+message MatchCancelled {
+  string player_id = 1;
+  string reason = 2;  // 취소 사유 (타임아웃 등)
+}
+
+message MatchNotificationResponse {
+  bool success = 1;
+}
+
+// ==========================
+// 게임 에이전트 ↔ 매칭 서버
+// ==========================
+
+service IngameMatchControl {
+  // 게임 에이전트 → 매칭 서버: 서버 등록
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+
+  // 게임 에이전트 → 매칭 서버: 서버 해제 (정상 종료 시)
+  rpc UnregisterServer(UnregisterServerRequest) returns (UnregisterServerResponse);
+
+  // 매칭 서버 → 게임 에이전트: 매치 준비 요청
+  rpc PrepareMatch(PrepareMatchRequest) returns (PrepareMatchResponse);
+
+  // 게임 에이전트 → 매칭 서버: 매치 준비 결과
+  rpc PrepareMatchResult(PrepareMatchResultRequest) returns (PrepareMatchResultResponse);
+}
+
+message RegisterServerRequest {
+  string server_id = 1;
+  ServerType server_type = 2;
+  string address = 3;  // 매칭 서버가 콜백할 주소
+}
+
+message RegisterServerResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message UnregisterServerRequest {
+  string server_id = 1;
+}
+
+message UnregisterServerResponse {
+  bool success = 1;
+}
+
+message PrepareMatchRequest {
+  string match_id = 1;
+  repeated string player_ids = 2;  // 이 방에 들어올 플레이어 목록
+}
+
+message PrepareMatchResponse {
+  bool accepted = 1;  // 준비 가능 여부 (수용 가능 여부 즉시 응답)
+  string error_message = 2;
+}
+
+message PrepareMatchResultRequest {
+  string match_id = 1;
+  bool success = 2;
+  string error_message = 3;  // 실패 시 사유
+}
+
+message PrepareMatchResultResponse {
+  bool acknowledged = 1;
+}

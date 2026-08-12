@@ -5,6 +5,7 @@ using MasterServer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Shared.Common.Redis;
 
 namespace MainServer.Common.MasterConnection;
 
@@ -16,7 +17,11 @@ namespace MainServer.Common.MasterConnection;
 public sealed class MasterConnectionService : BackgroundService
 {
     private readonly MasterConnectionOptions _options;
+    private readonly ISessionRegistry _sessionRegistry;
     private readonly ILogger<MasterConnectionService> _logger;
+
+    /// <summary>이 서버 인스턴스의 고유 ID.</summary>
+    public string InstanceId => _options.InstanceId;
 
     // 마스터로 보낼 메시지의 송신 큐. 하트비트 타이머와, 나중에 추가될 다른 종류의
     // 보고/요청(예: ShutdownNotice)이 둘 다 여기 넣기만 하면 SendLoopAsync 하나가
@@ -30,9 +35,11 @@ public sealed class MasterConnectionService : BackgroundService
 
     public MasterConnectionService(
         IOptions<MasterConnectionOptions> options,
+        ISessionRegistry sessionRegistry,
         ILogger<MasterConnectionService> logger)
     {
         _options = options.Value;
+        _sessionRegistry = sessionRegistry;
         _logger = logger;
     }
 
@@ -169,6 +176,7 @@ public sealed class MasterConnectionService : BackgroundService
                     if (stoppingToken.IsCancellationRequested) break;
 
                     await requestStream.WriteAsync(MakeHeartbeat(), stoppingToken);
+                    await _sessionRegistry.RefreshServerHeartbeatAsync(_options.InstanceId);
 
                     timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
                 }

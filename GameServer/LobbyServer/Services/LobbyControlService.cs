@@ -1,6 +1,7 @@
 using Grpc.Core;
 using LobbyServer.Auth;
 using LobbyServer;
+using MainServer.Common.MasterConnection;
 using Microsoft.Extensions.Logging;
 using Shared.Common.Redis;
 
@@ -15,15 +16,18 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 {
     private readonly ITokenProvider _tokenProvider;
     private readonly ISessionRegistry _sessionRegistry;
+    private readonly MasterConnectionService _masterConnection;
     private readonly ILogger<LobbyControlService> _logger;
 
     public LobbyControlService(
         ITokenProvider tokenProvider,
         ISessionRegistry sessionRegistry,
+        MasterConnectionService masterConnection,
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
         _sessionRegistry = sessionRegistry;
+        _masterConnection = masterConnection;
         _logger = logger;
     }
 
@@ -47,6 +51,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             Status = PlayerStatus.Lobby,
             CurrentServer = context.Host,
+            OwnerServerId = _masterConnection.InstanceId,
         });
 
         _logger.LogInformation("로그인 성공: {PlayerId}", request.PlayerId);
@@ -77,6 +82,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             Status = PlayerStatus.Lobby,
             CurrentServer = context.Host,
+            OwnerServerId = _masterConnection.InstanceId,
         });
 
         _logger.LogInformation("계정 생성 성공: {PlayerId}", request.PlayerId);
@@ -94,7 +100,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         _logger.LogInformation("로그아웃: {PlayerId}", playerId);
 
         if (!string.IsNullOrEmpty(playerId))
+        {
             await _sessionRegistry.RemoveAsync(playerId);
+        }
 
         return new LogoutResponse { Success = true };
     }

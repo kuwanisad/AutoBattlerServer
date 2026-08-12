@@ -1,6 +1,8 @@
 using Grpc.Core;
 using MasterServer.Registry;
 using MasterServer.Routing;
+using Shared.Common;
+using GameServer.Common;
 
 namespace MasterServer.Services;
 

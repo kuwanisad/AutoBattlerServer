@@ -1,23 +1,33 @@
-using System.Threading.Channels;
 using Grpc.Core;
 using MasterServer.Registry;
+using Shared.Common;
+using GameServer.Common;
 
 namespace MasterServer.Services;
 
 /// <summary>
 /// Connect RPC의 실제 로직 담당.
-/// 메인 서버 하나가 접속을 유지하는 동안 열려있는 양방향 스트림을 관리한다:
-///   - ReceiveLoopAsync: 메인 서버 → 마스터 방향 (하트비트 수신, 레지스트리 등록)
-///   - SendLoopAsync: 마스터 → 메인 서버 방향 (자체 하트비트 + OutboundQueue 소비)
+/// ShutdownNotice 수신 여부로 정상/비정상 종료를 구분한다.
+/// 비정상 종료 시 CleanupServerConnection을 통해 RegistryCleanupServer에 통보한다.
 /// </summary>
 internal sealed class ConnectionHandler
 {
     private readonly InstanceRegistry _registry;
+    private readonly CleanupServerConnection _cleanupConnection;
     private readonly ILogger _logger;
 
-    internal ConnectionHandler(InstanceRegistry registry, ILogger logger)
+    private sealed class ShutdownFlag
+    {
+        public bool IsNormal { get; set; }
+    }
+
+    internal ConnectionHandler(
+        InstanceRegistry registry,
+        CleanupServerConnection cleanupConnection,
+        ILogger logger)
     {
         _registry = registry;
+        _cleanupConnection = cleanupConnection;
         _logger = logger;
     }
 
@@ -28,9 +38,6 @@ internal sealed class ConnectionHandler
     {
         var connectionToken = Guid.NewGuid();
 
-        // InstanceId는 첫 MainServerMessage가 와야 알 수 있지만, OutboundQueue는 그 전에도
-        // 필요하다(SendLoop가 즉시 하트비트를 시작해야 하므로). 그래서 이 연결 전용
-        // InstanceInfo를 미리 만들어 양쪽 루프에 직접 전달한다.
         var pendingInfo = new InstanceInfo
         {
             InstanceId = string.Empty,
@@ -39,7 +46,8 @@ internal sealed class ConnectionHandler
             ConnectionToken = connectionToken,
         };
 
-        var receiveTask = ReceiveLoopAsync(requestStream, pendingInfo, cancellationToken);
+        var shutdownFlag = new ShutdownFlag();
+        var receiveTask = ReceiveLoopAsync(requestStream, pendingInfo, cancellationToken, shutdownFlag);
         var sendTask = SendLoopAsync(responseStream, pendingInfo, cancellationToken);
 
         var completedTask = await Task.WhenAny(receiveTask, sendTask);
@@ -53,34 +61,30 @@ internal sealed class ConnectionHandler
         {
             await completedTask;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // 앱 종료에 의한 정상적인 취소 - 예외를 삼키고 정리 단계로 넘어간다.
-        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         finally
         {
             if (!string.IsNullOrEmpty(pendingInfo.InstanceId))
             {
                 _registry.RemoveIfCurrent(pendingInfo.InstanceId, connectionToken);
                 _logger.LogWarning("인스턴스 접속 종료 처리: {InstanceId}", pendingInfo.InstanceId);
+
+                // 정상 종료(ShutdownNotice 수신)가 아닌 경우에만 RegistryCleanupServer에 통보
+                if (!shutdownFlag.IsNormal)
+                    _cleanupConnection.NotifyServerDied(pendingInfo.InstanceId);
             }
             else
             {
-                // 첫 MainServerMessage가 오기 전에 연결이 끊긴 경우.
-                // 레지스트리에 등록된 것이 없으니 정리할 건 없지만, 디버깅을 위해 기록해둔다.
                 _logger.LogWarning("인스턴스 식별 전 연결 종료 (connectionToken={Token})", connectionToken);
             }
         }
     }
 
-    /// <summary>
-    /// 메인 서버 → 마스터 방향. 마지막 메시지로부터 HeartbeatTimeout이 지나면
-    /// 죽은 것으로 간주하는 슬라이딩 윈도우를 구현한다.
-    /// </summary>
     private async Task ReceiveLoopAsync(
         IAsyncStreamReader<MainServerMessage> requestStream,
         InstanceInfo pendingInfo,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ShutdownFlag shutdownFlag)
     {
         try
         {
@@ -96,32 +100,31 @@ internal sealed class ConnectionHandler
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // 앱 종료가 아니라 우리가 건 하트비트 타임아웃이 발동한 경우.
                     _logger.LogWarning(
                         "하트비트 타임아웃으로 접속 종료 처리: {InstanceId}",
                         string.IsNullOrEmpty(pendingInfo.InstanceId) ? "(식별 전)" : pendingInfo.InstanceId);
                     return;
                 }
 
-                if (!hasNext)
-                {
-                    return; // 메인 서버가 스트림을 정상적으로 닫음
-                }
+                if (!hasNext) return;
 
                 var message = requestStream.Current;
 
                 switch (message.PayloadCase)
                 {
                     case MainServerMessage.PayloadOneofCase.Heartbeat:
-                        // 빈 생존 신호 - 수신 자체로 타임아웃이 리셋된다.
                         break;
 
                     case MainServerMessage.PayloadOneofCase.Status:
                         HandleStatus(message.Status, pendingInfo);
                         break;
 
+                    case MainServerMessage.PayloadOneofCase.Shutdown:
+                        _logger.LogInformation("정상 종료 신호 수신: {InstanceId}", pendingInfo.InstanceId);
+                        shutdownFlag.IsNormal = true;
+                        return;
+
                     case MainServerMessage.PayloadOneofCase.None:
-                        // 예상치 못한 빈 메시지 - 무시
                         break;
 
                     default:
@@ -132,7 +135,7 @@ internal sealed class ConnectionHandler
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // 앱 종료에 의한 정상적인 취소 - 루프를 정상 종료한다.
+            shutdownFlag.IsNormal = true; // 앱 종료는 정상 종료로 취급
         }
     }
 
@@ -151,12 +154,6 @@ internal sealed class ConnectionHandler
             status.InstanceId, status.ServerType, status.CurrentLoad, status.Capacity);
     }
 
-    /// <summary>
-    /// 마스터 → 메인 서버 방향. idle heartbeat 패턴을 사용한다:
-    /// - 큐에 업무 메시지가 있으면 그걸 보내고 타이머를 리셋한다.
-    /// - KeepaliveInterval 동안 보낼 게 없으면 그때만 빈 커맨드를 keepalive로 보낸다.
-    /// 실제 WriteAsync 호출은 이 루프 하나만 하므로 동시 쓰기 문제가 없다.
-    /// </summary>
     private async Task SendLoopAsync(
         IServerStreamWriter<MasterMessage> responseStream,
         InstanceInfo pendingInfo,
@@ -166,7 +163,6 @@ internal sealed class ConnectionHandler
         {
             var queueReader = pendingInfo.OutboundQueue.Reader;
 
-            // 연결 직후 첫 keepalive를 즉시 보낸다.
             await responseStream.WriteAsync(MakeHeartbeat(), cancellationToken);
 
             var timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
@@ -180,30 +176,22 @@ internal sealed class ConnectionHandler
                 {
                     if (cancellationToken.IsCancellationRequested) return;
 
-                    // KeepaliveInterval 동안 보낼 업무 메시지가 없었던 경우에만 keepalive 전송
                     await responseStream.WriteAsync(MakeHeartbeat(), cancellationToken);
-
                     timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
                 }
                 else
                 {
-                    if (!await queueTask) return; // 큐 닫힘 = 연결 정리 대상
+                    if (!await queueTask) return;
 
                     while (queueReader.TryRead(out var queued))
-                    {
                         await responseStream.WriteAsync(queued, cancellationToken);
-                    }
 
-                    // 업무 메시지를 보냈으니 타이머를 리셋한다.
                     timerTask = Task.Delay(ConnectionConstants.KeepaliveInterval, cancellationToken);
                     queueTask = queueReader.WaitToReadAsync(cancellationToken).AsTask();
                 }
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // 앱 종료에 의한 정상적인 취소
-        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     private static MasterMessage MakeHeartbeat() => new()

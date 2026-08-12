@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using GameServer.Common;
 
 namespace MasterServer.Registry;
 
@@ -43,7 +44,7 @@ public sealed class InstanceRegistry
         }
     }
 
-    public IReadOnlyCollection<InstanceInfo> GetByType(global::MasterServer.ServerType type) =>
+    public IReadOnlyCollection<InstanceInfo> GetByType(ServerType type) =>
         _instances.Values.Where(i => i.ServerType == type).ToList();
 
     /// <summary>
@@ -53,7 +54,7 @@ public sealed class InstanceRegistry
     /// 새 매치를 라우팅하는 사고를 줄여준다 (완전히 막아주진 않는다 — 등록 자체가
     /// 지연된 경우는 이 필터로도 해결되지 않는다).
     /// </summary>
-    public IReadOnlyCollection<InstanceInfo> GetFreshByType(global::MasterServer.ServerType type, TimeSpan maxAge)
+    public IReadOnlyCollection<InstanceInfo> GetFreshByType(ServerType type, TimeSpan maxAge)
     {
         var threshold = DateTime.UtcNow - maxAge;
         return _instances.Values

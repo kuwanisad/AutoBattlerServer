@@ -5,6 +5,18 @@
 
 ---
 
+## 프로젝트 구조
+
+```
+Main/
+  GameProject1/
+    DevTools/   ← 서버 실행 스크립트, Docker 설정
+    Unity/      ← Unity 프로젝트 (클라이언트 + 인게임 서버)
+    Server/     ← .NET 서버 프로젝트
+```
+
+---
+
 ## 시스템 요구사항
 
 | 항목 | 버전 |
@@ -40,7 +52,7 @@ Unity가 Git을 못 찾을 수 있다. 아래 명령으로 `bin` 경로를 추�
 
 ### 프로젝트 경로
 ```
-C:\Users\{사용자}\Desktop\Main\AutoBattler
+{Main}/GameProject1/Unity/
 ```
 
 ### 설치된 패키지 (Package Manager)
@@ -86,114 +98,52 @@ https://github.com/Cysharp/YetAnotherHttpHandler/releases/tag/redist-20240111-01
 
 **Google.Protobuf.dll 수동 설치:**
 ```powershell
-# NuGet에서 다운로드
 $nugetUrl = "https://www.nuget.org/api/v2/package/Google.Protobuf/3.25.1"
 Invoke-WebRequest -Uri $nugetUrl -OutFile "Google.Protobuf.nupkg"
-
-# .nupkg는 zip 형식
 Copy-Item "Google.Protobuf.nupkg" "Google.Protobuf.zip"
 Expand-Archive "Google.Protobuf.zip" -DestinationPath "Google.Protobuf" -Force
-
-# netstandard2.0 버전을 Unity Plugins 폴더에 복사
 Copy-Item "Google.Protobuf\lib\netstandard2.0\Google.Protobuf.dll" `
-    "C:\Users\{사용자}\Desktop\Main\AutoBattler\Assets\Plugins\Google.Protobuf.dll"
+    "{Main}\GameProject1\Unity\Assets\Plugins\Google.Protobuf.dll"
 ```
 
 ### 네이티브 DLL (Assets/Plugins/x86_64/)
 
-win-x64 전용 네이티브 DLL. Dedicated Server 빌드 시 자동으로 포함된다.
-
 | DLL | 출처 |
 |-----|------|
-| librdkafka.dll | NuGet: librdkafka.redist 2.6.0 |
-| librdkafkacpp.dll | NuGet: librdkafka.redist 2.6.0 |
-| libcrypto-3-x64.dll | NuGet: librdkafka.redist 2.6.0 |
-| libcurl.dll | NuGet: librdkafka.redist 2.6.0 |
-| libssl-3-x64.dll | NuGet: librdkafka.redist 2.6.0 |
-| msvcp140.dll | NuGet: librdkafka.redist 2.6.0 |
-| vcruntime140.dll | NuGet: librdkafka.redist 2.6.0 |
-| zlib1.dll | NuGet: librdkafka.redist 2.6.0 |
-| zstd.dll | NuGet: librdkafka.redist 2.6.0 |
+| librdkafka.dll 외 | NuGet: librdkafka.redist 2.6.0 |
 
-**네이티브 DLL 복사 명령:**
 ```powershell
-$unityNative = "C:\Users\{사용자}\Desktop\Main\AutoBattler\Assets\Plugins\x86_64"
-$nativeSrc = "C:\Users\{사용자}\.nuget\packages\librdkafka.redist\2.6.0\runtimes\win-x64\native"
-
+$unityNative = "{Main}\GameProject1\Unity\Assets\Plugins\x86_64"
+$nativeSrc = "{사용자}\.nuget\packages\librdkafka.redist\2.6.0\runtimes\win-x64\native"
 Copy-Item "$nativeSrc\*" $unityNative
 ```
 
 ---
 
-## IngameServer.Contracts 빌드 → Unity 자동 복사
+## Contracts 빌드 → Unity 자동 복사
 
-`IngameServer.Contracts.csproj`에 빌드 후 이벤트가 설정되어 있어
-빌드 시 생성된 `Ingame.cs`, `IngameGrpc.cs`가 자동으로 Unity로 복사된다.
+`Directory.Build.props`가 `Server/` 루트에 위치하며 Unity 경로를 상대 경로로 관리한다.
+새 환경에서는 `Directory.Build.props`만 확인하면 된다.
 
-```
-복사 대상: Assets\Scripts\Server\Generated\
-```
-
-**주의**: 복사 경로가 하드코딩되어 있다.
-```
-C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Server\Generated
-```
-빌드 시 `ingame.proto`에서 생성된 `Ingame.cs`, `IngameGrpc.cs` 두 파일이
-`Assets\Scripts\Server\Generated\`로 자동 복사된다.
-새 환경에서는 `IngameServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
-실제 환경에 맞게 수정할 것.
-
----
-
-## LobbyServer.Contracts 빌드 → Unity 자동 복사
-
-`LobbyServer.Contracts.csproj`에 빌드 후 이벤트가 설정되어 있어
-빌드 시 생성된 `Lobby.cs`, `LobbyGrpc.cs`가 자동으로 Unity로 복사된다.
-
-```
-복사 대상: Assets\Scripts\Client\Generated\
+```xml
+<!-- Server/Directory.Build.props -->
+<UnityProjectPath>$(MSBuildThisFileDirectory)..\Unity</UnityProjectPath>
+<UnityServerGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Server\Generated</UnityServerGeneratedPath>
+<UnityClientGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Client\Generated</UnityClientGeneratedPath>
 ```
 
-**주의**: 복사 경로가 하드코딩되어 있다.
-```
-C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Client\Generated
-```
-빌드 시 `lobby.proto`에서 생성된 `Lobby.cs`, `LobbyGrpc.cs` 두 파일이
-`Assets\Scripts\Client\Generated\`로 자동 복사된다.
-새 환경에서는 `LobbyServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
-실제 환경에 맞게 수정할 것.
-
----
-
-## ChatServer.Contracts 빌드 → Unity 자동 복사
-
-`ChatServer.Contracts.csproj`에 빌드 후 이벤트가 설정되어 있어
-빌드 시 생성된 `Chat.cs`, `ChatGrpc.cs`가 자동으로 Unity로 복사된다.
-
-```
-복사 대상: Assets\Scripts\Client\Generated\
-```
-
-**주의**: 복사 경로가 하드코딩되어 있다.
-```
-C:\Users\rlawh\Desktop\Main\AutoBattler\Assets\Scripts\Client\Generated
-```
-빌드 시 `chat.proto`에서 생성된 `Chat.cs`, `ChatGrpc.cs` 두 파일이
-`Assets\Scripts\Client\Generated\`로 자동 복사된다.
-새 환경에서는 `ChatServer.Contracts.csproj`의 `CopyGeneratedToUnity` 타겟 경로를
-실제 환경에 맞게 수정할 것.
+| 프로젝트 | 생성 파일 | 복사 대상 |
+|----------|-----------|-----------|
+| IngameServer.Contracts | Ingame.cs, IngameGrpc.cs | Assets\Scripts\Server\Generated\ |
+| LobbyServer.Contracts | Lobby.cs, LobbyGrpc.cs | Assets\Scripts\Client\Generated\ |
+| ChatServer.Contracts | Chat.cs, ChatGrpc.cs | Assets\Scripts\Client\Generated\ |
 
 ---
 
 ## Docker 컨테이너
 
-DevTools 폴더의 `docker-compose.yml`로 관리한다.
-
-```powershell
-cd "C:\Users\{사용자}\Desktop\Main\AutoBattleDevTools"
-docker-compose up -d    # 시작
-docker-compose down     # 종료
-```
+`DevTools/docker-compose.yml`로 관리한다.
+`start-servers.ps1` / `stop-servers.ps1`이 자동으로 처리한다.
 
 | 서비스 | 이미지 | 포트 |
 |--------|--------|------|
@@ -205,10 +155,25 @@ RabbitMQ 관리 콘솔: `http://localhost:15672` (guest/guest)
 
 ---
 
+## 서버 실행/종료
+
+```powershell
+cd "{Main}\GameProject1\DevTools"
+Unblock-File .\start-servers.ps1
+Unblock-File .\stop-servers.ps1
+.\start-servers.ps1   # 시작
+.\stop-servers.ps1    # 종료
+```
+
+스크립트가 `$PSScriptRoot` 기준으로 경로를 계산하므로
+어느 환경에서도 폴더 구조만 맞으면 수정 없이 동작한다.
+
+---
+
 ## shared.appsettings.json
 
 Kafka/RabbitMQ/Redis 연결 정보를 담은 공유 설정 파일.
-위치: `GameServer/Shared/shared.appsettings.json`
+위치: `Server/GameServer/Shared/shared.appsettings.json`
 
 각 서버 프로젝트 `csproj`에 빌드 시 출력 폴더로 자동 복사되는 설정이 있다.
 
@@ -216,9 +181,9 @@ Kafka/RabbitMQ/Redis 연결 정보를 담은 공유 설정 파일.
 
 ## 주의사항
 
-- `IngameServer.Contracts.csproj`, `LobbyServer.Contracts.csproj`, `ChatServer.Contracts.csproj`의
-  Unity 복사 경로는 절대 경로가 하드코딩되어 있다. 새 환경에서는 반드시 경로를 수정할 것.
 - Unity Plugins 폴더의 DLL들은 Git에 포함되어 있지 않다.
   새 환경에서는 위 지침대로 수동 설치해야 한다.
 - `System.Runtime` 버전 충돌 주의: .NET 8 기반 DLL을 Unity Plugins에 넣으면
   Unity Mono 런타임과 충돌한다. 반드시 `netstandard2.0` 또는 `netstandard2.1` 버전을 사용할 것.
+- `Directory.Build.props`의 Unity 경로는 상대 경로이므로
+  `GameProject1/Server/` 루트에 반드시 위치해야 한다.

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+option csharp_namespace = "GameServer.Common";
+
+// 여러 서비스에서 공통으로 사용하는 타입을 정의한다.
+// master.proto, matching.proto 등에서 임포트한다.
+
+enum ServerType {
+  SERVER_TYPE_UNSPECIFIED = 0;
+  LOBBY = 1;
+  INGAME = 2;
+  CHAT = 3;
+  MATCHING = 4;
+}

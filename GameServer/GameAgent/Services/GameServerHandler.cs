@@ -3,6 +3,7 @@ using IngameServer;
 using MainServer.Common.MasterConnection;
 using Microsoft.Extensions.Logging;
 using Shared.Common.Redis;
+using Shared.Common;
 
 namespace GameAgent.Services;
 
@@ -256,10 +257,23 @@ public sealed class GameServerHandler
         }
         else
         {
-            response.Approved = true;
-            serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
-            _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
-                request.ClientId, request.PlayerId);
+            // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인
+            var claimed = await _sessionRegistry.TryClaimOwnershipAsync(
+                _masterConnection.InstanceId, request.PlayerId);
+
+            if (!claimed)
+            {
+                response.Approved = false;
+                response.Reason = "권한 이전 거부 - 기존 서버 아직 살아있음";
+                _logger.LogWarning("접속 거부 - 권한 이전 거부: PlayerId={PlayerId}", request.PlayerId);
+            }
+            else
+            {
+                response.Approved = true;
+                serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
+                _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
+                    request.ClientId, request.PlayerId);
+            }
         }
 
         var written = serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
@@ -282,6 +296,7 @@ public sealed class GameServerHandler
             session.CurrentServer = joined.RoomId;
             session.NextServer = string.Empty;
             session.MatchToken = string.Empty;
+            session.OwnerServerId = _masterConnection.InstanceId;
             await _sessionRegistry.UpdateAsync(joined.PlayerId, session);
         }
         else

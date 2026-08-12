@@ -4,11 +4,15 @@
   <Project Path="GameServer/GameAgent/GameAgent.csproj" />
   <Project Path="GameServer/LobbyServer/LobbyServer.csproj" />
   <Project Path="GameServer/MasterServer/MasterServer.csproj" />
+  <Project Path="GameServer/RegistryCleanupServer/RegistryCleanupServer.csproj" />
   <Project Path="GameServer/Shared/ChatServer.Contracts/ChatServer.Contracts.csproj" />
+  <Project Path="GameServer/Shared/Common.Contracts/Common.Contracts.csproj" />
   <Project Path="GameServer/Shared/IngameServer.Contracts/IngameServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/LobbyServer.Contracts/LobbyServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/MainServer.Common/MainServer.Common.csproj" />
   <Project Path="GameServer/Shared/MasterServer.Contracts/MasterServer.Contracts.csproj" />
+  <Project Path="GameServer/Shared/MatchingServer.Contracts/MatchingServer.Contracts.csproj" />
+  <Project Path="GameServer/Shared/RegistryCleanupServer.Contracts/RegistryCleanupServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/Shared.Common/Shared.Common.csproj" />
   <Project Path="GameServer/Shared/SubServer.Common/SubServer.Common.csproj" />
 </Solution>

@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <!-- Server 폴더 기준으로 Unity 프로젝트 경로를 상대 경로로 계산 -->
+    <!-- $(MSBuildThisFileDirectory) = GameProject1/Server/ -->
+    <!-- ..\Unity = GameProject1/Unity/ -->
+    <UnityProjectPath>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\Unity'))</UnityProjectPath>
+    <UnityServerGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Server\Generated</UnityServerGeneratedPath>
+    <UnityClientGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Client\Generated</UnityClientGeneratedPath>
+  </PropertyGroup>
+</Project>

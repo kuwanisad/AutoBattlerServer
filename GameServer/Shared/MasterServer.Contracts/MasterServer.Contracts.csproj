@@ -1,21 +1,27 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
-    <PackageReference Include="Google.Protobuf" Version="3.27.0" />
-    <PackageReference Include="Grpc.Core.Api" Version="2.63.0" />
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
+		<PackageReference Include="Google.Protobuf" Version="3.27.0" />
+		<PackageReference Include="Grpc.Core.Api" Version="2.63.0" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <!-- Both: 서버용 베이스 클래스(MasterControlBase)와 클라이언트용 클래스(MasterControlClient)를
+	<ItemGroup>
+		<ProjectReference Include="..\Common.Contracts\Common.Contracts.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Both: 서버용 베이스 클래스(MasterControlBase)와 클라이언트용 클래스(MasterControlClient)를
          이 프로젝트 하나에서 같이 생성한다. MasterServer는 Base를, LobbyServer는 Client를 쓴다. -->
-    <Protobuf Include="Protos\master.proto" GrpcServices="Both" />
-  </ItemGroup>
+		<Protobuf Include="Protos\master.proto" GrpcServices="Both">
+			<AdditionalImportDirs>..\Common.Contracts\Protos</AdditionalImportDirs>
+		</Protobuf>
+	</ItemGroup>
 
 </Project>
