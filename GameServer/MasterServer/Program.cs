@@ -1,9 +1,14 @@
 using MasterServer;
 using MasterServer.Registry;
 using MasterServer.Routing;
+using MasterServer.Security;
 using MasterServer.Services;
+using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
+builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -24,10 +29,10 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddGrpc();
 builder.Services.AddSingleton<InstanceRegistry>();
 builder.Services.AddSingleton<IRoutingStrategy, LeastLoadRoutingStrategy>();
+builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisOptions.SectionName));
 
-// RegistryCleanupServer 상시 연결
-builder.Services.AddSingleton<CleanupServerConnection>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<CleanupServerConnection>());
+// TODO: mTLS 도입 시 CompositeServerAuthenticator(+ 개별 검증기)로 교체
+builder.Services.AddSingleton<IServerAuthenticator, DummyServerAuthenticator>();
 
 var app = builder.Build();
 

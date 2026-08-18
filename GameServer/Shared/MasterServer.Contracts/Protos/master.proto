@@ -39,6 +39,7 @@ message MasterMessage {
     MasterHeartbeat heartbeat = 1;
     MasterCommand command = 2;
     MatchingServerInfo matching_server = 3;  // 마스터가 메인 서버에 매칭 서버 주소 전달
+    SessionRegistryInfo session_registry = 4;  // 마스터가 메인 서버에 세션 레지스트리(Redis) 주소 전달
   }
 }
 
@@ -46,6 +47,11 @@ message MasterHeartbeat {}
 
 // 마스터 서버가 메인 서버들에게 매칭 서버 주소를 알린다.
 message MatchingServerInfo {
+  string address = 1;
+}
+
+// 마스터 서버가 메인 서버들에게 세션 레지스트리(Redis) 주소를 알린다.
+message SessionRegistryInfo {
   string address = 1;
 }
 

@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MasterServer.Contracts\MasterServer.Contracts.csproj" />
+    <ProjectReference Include="..\MatchingServer.Contracts\MatchingServer.Contracts.csproj" />
     <ProjectReference Include="..\Shared.Common\Shared.Common.csproj" />
   </ItemGroup>
 

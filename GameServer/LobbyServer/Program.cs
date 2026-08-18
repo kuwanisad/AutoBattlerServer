@@ -1,6 +1,7 @@
 using Confluent.Kafka;
 using LobbyServer.Auth;
 using LobbyServer.Services;
+using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -24,7 +25,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionSe
 builder.Services.AddMainServerMessaging(builder.Configuration);
 
 // Redis
-builder.Services.AddSessionRegistry(builder.Configuration);
+builder.Services.AddSessionRegistry();
+builder.Services.AddHostedService<ServerHeartbeatService>();
 
 // 인증
 builder.Services.AddSingleton<ITokenProvider, DummyTokenProvider>();

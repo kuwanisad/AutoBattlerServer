@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
 namespace Shared.Common.Redis;
@@ -9,13 +8,16 @@ namespace Shared.Common.Redis;
 /// 플레이어 세션을 Redis String으로 저장한다.
 /// 키 형식: session:{playerId}
 /// 직렬화 방식은 ISessionSerializer에 위임한다.
+///
+/// 이 클래스는 순수하게 "이미 알고 있는 주소로 연결해서 CRUD를 수행"하는 역할만 한다.
+/// 주소를 언제 어떻게 알아내는지(마스터로부터 수신 등)는 SessionRegistryConnector가 담당한다.
 /// </summary>
 public sealed class RedisSessionRegistry : ISessionRegistry, IDisposable
 {
     private readonly IConnectionMultiplexer _redis;
     private readonly IDatabase _db;
     private readonly ISessionSerializer _serializer;
-    private readonly ILogger<RedisSessionRegistry> _logger;
+    private readonly ILogger _logger;
 
     private const string SessionKeyPrefix = "session:";
     private const string ServerKeyPrefix = "server:";
@@ -62,15 +64,15 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IDisposable
 
 
     public RedisSessionRegistry(
-        IOptions<RedisOptions> options,
+        string connectionString,
         ISessionSerializer serializer,
-        ILogger<RedisSessionRegistry> logger)
+        ILogger logger)
     {
         _serializer = serializer;
         _logger = logger;
-        _redis = ConnectionMultiplexer.Connect(options.Value.ConnectionString);
+        _redis = ConnectionMultiplexer.Connect(connectionString);
         _db = _redis.GetDatabase();
-        _logger.LogInformation("Redis 연결 완료: {ConnectionString}", options.Value.ConnectionString);
+        _logger.LogInformation("Redis 연결 완료: {ConnectionString}", connectionString);
     }
 
     // === 플레이어 세션 ===

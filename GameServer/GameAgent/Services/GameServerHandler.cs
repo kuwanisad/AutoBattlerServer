@@ -1,9 +1,11 @@
 using Grpc.Core;
+using Grpc.Net.Client;
 using IngameServer;
 using MainServer.Common.MasterConnection;
+using MatchingServer;
 using Microsoft.Extensions.Logging;
-using Shared.Common.Redis;
 using Shared.Common;
+using Shared.Common.Redis;
 
 namespace GameAgent.Services;
 
@@ -23,7 +25,7 @@ public sealed class GameServerHandler
     private readonly MasterConnectionService _masterConnection;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ILogger<GameServerHandler> _logger;
-
+    private GameServerInfo? _serverInfo;
     public GameServerHandler(
         MasterConnectionService masterConnection,
         ISessionRegistry sessionRegistry,
@@ -39,11 +41,11 @@ public sealed class GameServerHandler
         IServerStreamWriter<GameAgentMessage> responseStream,
         CancellationToken cancellationToken)
     {
-        var serverInfo = new GameServerInfo();
+        _serverInfo = new GameServerInfo();
         _logger.LogInformation("게임 서버 연결됨");
 
-        var receiveTask = ReceiveLoopAsync(requestStream, responseStream, serverInfo, cancellationToken);
-        var sendTask = SendLoopAsync(responseStream, serverInfo, cancellationToken);
+        var receiveTask = ReceiveLoopAsync(requestStream, responseStream, _serverInfo, cancellationToken);
+        var sendTask = SendLoopAsync(responseStream, _serverInfo, cancellationToken);
 
         var completedTask = await Task.WhenAny(receiveTask, sendTask);
         var remainingTask = completedTask == receiveTask ? sendTask : receiveTask;
@@ -61,9 +63,27 @@ public sealed class GameServerHandler
         {
             _logger.LogInformation("게임 서버 연결 종료");
 
-            if (serverInfo.IsReady)
+            if (_serverInfo.IsReady)
             {
                 _masterConnection.UpdateStatus(currentLoad: 0, capacity: 0);
+
+                // 매칭 서버에서 해제
+                if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+                {
+                    try
+                    {
+                        using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+                        var client = new IngameMatchControl.IngameMatchControlClient(channel);
+                        await client.UnregisterServerAsync(new UnregisterServerRequest
+                        {
+                            ServerId = _masterConnection.InstanceId,
+                        }, cancellationToken: CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "매칭 서버 해제 실패");
+                    }
+                }
             }
         }
     }
@@ -201,7 +221,20 @@ public sealed class GameServerHandler
         _logger.LogInformation("게임 서버 준비 완료. Capacity={Capacity}", ready.Capacity);
 
         _masterConnection.UpdateStatus(currentLoad: 0, capacity: ready.Capacity);
-        await Task.CompletedTask;
+
+        // 매칭 서버에 자신을 등록
+        if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+        {
+            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+            var client = new IngameMatchControl.IngameMatchControlClient(channel);
+            await client.RegisterServerAsync(new RegisterServerRequest
+            {
+                ServerId = _masterConnection.InstanceId,
+                ServerType = GameServer.Common.ServerType.Ingame,
+                Address = _masterConnection.SelfAddress,
+            });
+            _logger.LogInformation("매칭 서버에 등록 완료");
+        }
     }
 
     private void HandleRoomOpened(RoomOpened roomOpened)
@@ -249,12 +282,6 @@ public sealed class GameServerHandler
             _logger.LogWarning("접속 거부 - 잘못된 상태: PlayerId={PlayerId} Status={Status}",
                 request.PlayerId, session.Status);
         }
-        else if (session.MatchToken != request.MatchToken)
-        {
-            response.Approved = false;
-            response.Reason = "매치 토큰 불일치";
-            _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
-        }
         else
         {
             // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인
@@ -295,7 +322,6 @@ public sealed class GameServerHandler
             session.Status = PlayerStatus.Ingame;
             session.CurrentServer = joined.RoomId;
             session.NextServer = string.Empty;
-            session.MatchToken = string.Empty;
             session.OwnerServerId = _masterConnection.InstanceId;
             await _sessionRegistry.UpdateAsync(joined.PlayerId, session);
         }
@@ -320,6 +346,7 @@ public sealed class GameServerHandler
             session.Status = PlayerStatus.Moving;
             session.CurrentServer = string.Empty;
             session.NextServer = "lobby";
+            session.OwnerServerId = string.Empty;
             await _sessionRegistry.UpdateAsync(left.PlayerId, session);
         }
     }
@@ -328,4 +355,6 @@ public sealed class GameServerHandler
     {
         Heartbeat = new GameAgentHeartbeat(),
     };
+
+    public GameServerInfo? GetServerInfo() => _serverInfo;
 }

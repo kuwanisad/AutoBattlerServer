@@ -1,7 +1,9 @@
 using System.Threading.Channels;
 using Grpc.Core;
 using Grpc.Net.Client;
+using GameServer.Common;
 using MasterServer;
+using MatchingServer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -17,11 +19,17 @@ namespace MainServer.Common.MasterConnection;
 public sealed class MasterConnectionService : BackgroundService
 {
     private readonly MasterConnectionOptions _options;
-    private readonly ISessionRegistry _sessionRegistry;
+    private readonly ISessionRegistryConnector _sessionRegistryConnector;
     private readonly ILogger<MasterConnectionService> _logger;
+
+    /// <summary>마스터 서버로부터 받은 매칭 서버 주소.</summary>
+    public string MatchingServerAddress { get; private set; } = string.Empty;
 
     /// <summary>이 서버 인스턴스의 고유 ID.</summary>
     public string InstanceId => _options.InstanceId;
+
+    /// <summary>다른 서버가 이 인스턴스에 접속할 주소.</summary>
+    public string SelfAddress => _options.SelfAddress;
 
     // 마스터로 보낼 메시지의 송신 큐. 하트비트 타이머와, 나중에 추가될 다른 종류의
     // 보고/요청(예: ShutdownNotice)이 둘 다 여기 넣기만 하면 SendLoopAsync 하나가
@@ -35,11 +43,11 @@ public sealed class MasterConnectionService : BackgroundService
 
     public MasterConnectionService(
         IOptions<MasterConnectionOptions> options,
-        ISessionRegistry sessionRegistry,
+        ISessionRegistryConnector sessionRegistryConnector,
         ILogger<MasterConnectionService> logger)
     {
         _options = options.Value;
-        _sessionRegistry = sessionRegistry;
+        _sessionRegistryConnector = sessionRegistryConnector;
         _logger = logger;
     }
 
@@ -176,7 +184,6 @@ public sealed class MasterConnectionService : BackgroundService
                     if (stoppingToken.IsCancellationRequested) break;
 
                     await requestStream.WriteAsync(MakeHeartbeat(), stoppingToken);
-                    await _sessionRegistry.RefreshServerHeartbeatAsync(_options.InstanceId);
 
                     timerTask = Task.Delay(_options.HeartbeatInterval, stoppingToken);
                 }
@@ -242,6 +249,25 @@ public sealed class MasterConnectionService : BackgroundService
                         HandleCommand(message.Command);
                         break;
 
+                    case MasterMessage.PayloadOneofCase.MatchingServer:
+                        MatchingServerAddress = message.MatchingServer.Address;
+                        _logger.LogInformation("매칭 서버 주소 수신: {Address}", MatchingServerAddress);
+
+                        // 로비 서버는 매칭 서버가 콜백(NotifyMatch)을 보낼 수 있도록 자신을 등록해둔다.
+                        // 게임 에이전트는 실제 게임 서버(Unity)가 준비됐을 때(GameServerHandler)
+                        // 별도로 등록하므로 여기서는 다루지 않는다.
+                        if (_options.ServerType == ServerType.Lobby)
+                        {
+                            _ = RegisterSelfWithMatchingServerAsync(stoppingToken);
+                        }
+                        break;
+
+                    case MasterMessage.PayloadOneofCase.SessionRegistry:
+                        // 로비/게임 에이전트/채팅/매칭 서버 전부 세션 레지스트리(Redis)가 필요하므로
+                        // 서버 타입 구분 없이 받는 즉시 연결을 요청한다.
+                        _ = ConnectSessionRegistryAsync(message.SessionRegistry.Address, stoppingToken);
+                        break;
+
                     default:
                         _logger.LogWarning("알 수 없는 MasterMessage 종류: {Case}", message.PayloadCase);
                         break;
@@ -271,6 +297,59 @@ public sealed class MasterConnectionService : BackgroundService
             default:
                 _logger.LogWarning("알 수 없는 MasterCommand 종류: {Case}", command.CommandCase);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// 매칭 서버가 콜백(NotifyMatch)을 보낼 때 InstanceId로 이 로비의 주소를 찾을 수 있도록,
+    /// 매칭 서버 주소를 받는 즉시 자신을 등록한다. 매칭 서버가 재시작되어 주소를 다시
+    /// 보내오는 경우에도 재등록되도록 매번 호출한다 (MatchEngine 쪽은 upsert로 처리).
+    /// </summary>
+    private async Task RegisterSelfWithMatchingServerAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(MatchingServerAddress);
+            var client = new IngameMatchControl.IngameMatchControlClient(channel);
+            await client.RegisterServerAsync(new RegisterServerRequest
+            {
+                ServerId = _options.InstanceId,
+                ServerType = _options.ServerType,
+                Address = _options.SelfAddress,
+            }, cancellationToken: stoppingToken);
+
+            _logger.LogInformation("매칭 서버에 로비 등록 완료: {InstanceId} @ {Address}",
+                _options.InstanceId, _options.SelfAddress);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // 앱 종료 중 정상 취소
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "매칭 서버에 로비 등록 실패: {InstanceId}", _options.InstanceId);
+        }
+    }
+
+    /// <summary>
+    /// 마스터로부터 세션 레지스트리(Redis) 주소를 받으면 SessionRegistryConnector에
+    /// 실제 연결을 요청한다. 이 호출이 끝나기 전까지 ISessionRegistry를 쓰는 코드는
+    /// 전부 대기 상태로 남아있다가, 연결되는 순간 한꺼번에 풀린다.
+    /// </summary>
+    private async Task ConnectSessionRegistryAsync(string address, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await _sessionRegistryConnector.ConnectAsync(address, stoppingToken);
+            _logger.LogInformation("세션 레지스트리 연결 완료: {Address}", address);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // 앱 종료 중 정상 취소
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "세션 레지스트리 연결 실패: {Address}", address);
         }
     }
 }

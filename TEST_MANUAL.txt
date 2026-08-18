@@ -1,53 +1,24 @@
 ================================================================
-AutoBattler Server - 로컬 테스트 메뉴얼
+AutoBattler Server - 로컬 테스트 매뉴얼
 ================================================================
 
-[ 사전 준비 ]
+[ 서버 실행 ]
 
-1. Docker Desktop 실행 확인
-2. 컨테이너 실행 (AutoBattleDevTools 폴더에서)
+DevTools/start-servers.ps1 하나로 Docker 컨테이너, BrokerInitializer,
+전체 서버(Master → Matching → DummySubServer → Lobby → GameAgent → Chat)가
+순서대로 뜬다. 최초 환경 설정은 ENVIRONMENT.md 참고.
 
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattleDevTools"
-   docker-compose up -d
+   cd "{Main}\GameProject1\DevTools"
+   .\start-servers.ps1
 
-3. BrokerInitializer 실행 - 토픽/큐 초기화
-   (이전 테스트 데이터를 완전히 날리고 새로 만든다)
-
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattleDevTools\BrokerInitializer"
-   dotnet run
-
-   완료 메시지: "=== 초기화 완료 ==="
+각 서버가 별도 창으로 뜬다. MasterServer 창에
+"상태 수신: ... (Lobby) 부하 0/100" 같은 로그가 보이면 정상 등록된 것이다.
 
 ----------------------------------------------------------------
 
-[ 서버 실행 순서 ]
-(각각 별도 터미널에서 실행한다)
+[ 메시지 발행 테스트 ]  (Kafka/RabbitMQ 브로커 동작 확인용)
 
-터미널 1 - MasterServer
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattlerServer\GameServer\MasterServer"
-   dotnet run
-
-   확인: "Now listening on: http://[::]:5100"
-
-터미널 2 - DummySubServer
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattlerServer\GameServer\DummySubServer"
-   dotnet run
-
-   확인:
-   "Kafka 구독 시작: game-events, match-results (GroupId=dummy-sub-server)"
-   "RabbitMQ 구독 시작: Queue=reward-queue"
-
-터미널 3 - LobbyServer
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattlerServer\GameServer\LobbyServer"
-   dotnet run
-
-   확인 (MasterServer 로그):
-   "상태 수신: ... (Lobby) 부하 0/100"
-
-----------------------------------------------------------------
-
-[ 메시지 발행 테스트 ]
-(터미널 4 - PowerShell에서 실행)
+(PowerShell에서 실행 - LobbyServer의 REST 테스트 엔드포인트 사용)
 
 1. Kafka 발행
    Invoke-WebRequest -Method POST "http://localhost:5201/test/kafka?topic=game-events&message=hello-kafka" -UseBasicParsing
@@ -74,22 +45,13 @@ DummySubServer 로그에 아래 두 줄이 찍히면 성공:
 
 ----------------------------------------------------------------
 
-[ 포트 정리 ]
+[ 포트 / 종료 ]
 
-MasterServer   5100 (gRPC), 5101 (REST)
-LobbyServer    5200 (gRPC), 5201 (REST/테스트 엔드포인트)
-DummySubServer 5300 (REST)
-Kafka          9092
-RabbitMQ       5672 (AMQP), 15672 (관리 콘솔)
+전체 포트 배정은 PROJECT_STRUCTURE.md를 참고한다 (여기서 별도로 관리하지 않음).
 
-----------------------------------------------------------------
+종료:
 
-[ 종료 ]
-
-각 터미널에서 Ctrl+C로 서버 종료
-컨테이너 종료:
-
-   cd "C:\Users\rlawh\Desktop\Main\AutoBattleDevTools"
-   docker-compose down
+   cd "{Main}\GameProject1\DevTools"
+   .\stop-servers.ps1
 
 ================================================================

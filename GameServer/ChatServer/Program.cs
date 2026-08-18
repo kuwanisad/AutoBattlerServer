@@ -1,3 +1,4 @@
+using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -29,7 +30,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionSe
 builder.Services.AddMainServerMessaging(builder.Configuration);
 
 // Redis
-builder.Services.AddSessionRegistry(builder.Configuration);
+builder.Services.AddSessionRegistry();
+builder.Services.AddHostedService<ServerHeartbeatService>();
 
 // 채팅 서버 핵심 서비스
 builder.Services.AddSingleton<IChatMessageStore, InMemoryChatMessageStore>();
