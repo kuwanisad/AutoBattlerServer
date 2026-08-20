@@ -35,6 +35,21 @@ public sealed class ServerHeartbeatService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // 최초 등록 (ID + 주소). SessionRegistryConnector가 아직 연결 전이면 여기서 대기한다.
+        // 이후 하트비트는 값을 다시 안 보내고 TTL만 갱신하므로, 여기서 한 번은 꼭 등록해야 한다.
+        try
+        {
+            await _sessionRegistry.RegisterServerAsync(_options.InstanceId, _options.SelfAddress);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "서버 등록 실패: {InstanceId} - 하트비트 루프는 계속 진행", _options.InstanceId);
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try

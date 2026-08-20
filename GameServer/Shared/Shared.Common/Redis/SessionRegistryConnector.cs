@@ -70,12 +70,6 @@ public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistr
 
     // === ISessionRegistry - 전부 연결될 때까지 기다렸다가 실제 구현체에 위임 ===
 
-    public async Task RegisterAsync(string playerId, PlayerSession session)
-    {
-        var registry = await GetRegistryAsync();
-        await registry.RegisterAsync(playerId, session);
-    }
-
     public async Task<PlayerSession?> GetAsync(string playerId)
     {
         var registry = await GetRegistryAsync();
@@ -100,6 +94,12 @@ public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistr
         return await registry.ExistsAsync(playerId);
     }
 
+    public async Task RegisterServerAsync(string serverId, string address)
+    {
+        var registry = await GetRegistryAsync();
+        await registry.RegisterServerAsync(serverId, address);
+    }
+
     public async Task RefreshServerHeartbeatAsync(string serverId)
     {
         var registry = await GetRegistryAsync();
@@ -112,10 +112,29 @@ public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistr
         return await registry.IsServerAliveAsync(serverId);
     }
 
-    public async Task<bool> TryClaimOwnershipAsync(string serverId, string playerId)
+    public async Task<string?> GetServerAddressAsync(string serverId)
     {
         var registry = await GetRegistryAsync();
-        return await registry.TryClaimOwnershipAsync(serverId, playerId);
+        return await registry.GetServerAddressAsync(serverId);
+    }
+
+    public async Task<OwnerInfo?> GetOwnerAsync(string playerId)
+    {
+        var registry = await GetRegistryAsync();
+        return await registry.GetOwnerAsync(playerId);
+    }
+
+    public async Task<bool> TryClaimOwnershipAsync(string serverId, string playerId, PlayerSession newSession)
+    {
+        var registry = await GetRegistryAsync();
+        return await registry.TryClaimOwnershipAsync(serverId, playerId, newSession);
+    }
+
+    public async Task<ClaimResult> TryClaimOwnershipWithPreviousOwnerAsync(
+        string serverId, string playerId, PlayerSession newSession)
+    {
+        var registry = await GetRegistryAsync();
+        return await registry.TryClaimOwnershipWithPreviousOwnerAsync(serverId, playerId, newSession);
     }
 
     public void Dispose()

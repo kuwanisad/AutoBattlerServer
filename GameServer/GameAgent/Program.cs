@@ -1,6 +1,7 @@
 using GameAgent.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
+using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Redis;
@@ -28,6 +29,12 @@ builder.Services.AddSingleton<MasterConnectionService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionService>());
 
 builder.Services.AddMainServerMessaging(builder.Configuration);
+
+// 매칭 서버 접속 - 게임 서버(Unity)가 Ready를 보낼 때까지 대기했다가 시작한다
+// (GameServerHandler.HandleReadyAsync가 SignalReady() 호출). IMatchNotificationHandler는
+// 등록 안 함 - 게임 에이전트는 매칭 알림을 받을 일이 없다(로비 전용).
+builder.Services.AddSingleton<MatchServerConnection>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchServerConnection>());
 
 // Redis - Session Registry
 builder.Services.AddSessionRegistry();

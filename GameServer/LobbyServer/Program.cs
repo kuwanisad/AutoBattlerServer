@@ -3,6 +3,7 @@ using LobbyServer.Auth;
 using LobbyServer.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
+using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Redis;
@@ -23,6 +24,13 @@ builder.Services.Configure<MasterConnectionOptions>(
 builder.Services.AddSingleton<MasterConnectionService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionService>());
 builder.Services.AddMainServerMessaging(builder.Configuration);
+
+// 매칭 서버 접속 - 로비는 즉시 접속을 시도한다(MatchServerConnection이 자체적으로 준비된 것으로 봄).
+// 매칭 서버가 push하는 매칭 확정/취소 알림은 MatchNotificationDispatcher가 받아서 처리한다.
+builder.Services.AddSingleton<MatchNotificationDispatcher>();
+builder.Services.AddSingleton<IMatchNotificationHandler>(sp => sp.GetRequiredService<MatchNotificationDispatcher>());
+builder.Services.AddSingleton<MatchServerConnection>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchServerConnection>());
 
 // Redis
 builder.Services.AddSessionRegistry();

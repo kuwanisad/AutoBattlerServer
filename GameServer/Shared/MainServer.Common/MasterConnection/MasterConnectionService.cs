@@ -3,7 +3,6 @@ using Grpc.Core;
 using Grpc.Net.Client;
 using GameServer.Common;
 using MasterServer;
-using MatchingServer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -252,14 +251,6 @@ public sealed class MasterConnectionService : BackgroundService
                     case MasterMessage.PayloadOneofCase.MatchingServer:
                         MatchingServerAddress = message.MatchingServer.Address;
                         _logger.LogInformation("매칭 서버 주소 수신: {Address}", MatchingServerAddress);
-
-                        // 로비 서버는 매칭 서버가 콜백(NotifyMatch)을 보낼 수 있도록 자신을 등록해둔다.
-                        // 게임 에이전트는 실제 게임 서버(Unity)가 준비됐을 때(GameServerHandler)
-                        // 별도로 등록하므로 여기서는 다루지 않는다.
-                        if (_options.ServerType == ServerType.Lobby)
-                        {
-                            _ = RegisterSelfWithMatchingServerAsync(stoppingToken);
-                        }
                         break;
 
                     case MasterMessage.PayloadOneofCase.SessionRegistry:
@@ -297,37 +288,6 @@ public sealed class MasterConnectionService : BackgroundService
             default:
                 _logger.LogWarning("알 수 없는 MasterCommand 종류: {Case}", command.CommandCase);
                 break;
-        }
-    }
-
-    /// <summary>
-    /// 매칭 서버가 콜백(NotifyMatch)을 보낼 때 InstanceId로 이 로비의 주소를 찾을 수 있도록,
-    /// 매칭 서버 주소를 받는 즉시 자신을 등록한다. 매칭 서버가 재시작되어 주소를 다시
-    /// 보내오는 경우에도 재등록되도록 매번 호출한다 (MatchEngine 쪽은 upsert로 처리).
-    /// </summary>
-    private async Task RegisterSelfWithMatchingServerAsync(CancellationToken stoppingToken)
-    {
-        try
-        {
-            using var channel = GrpcChannel.ForAddress(MatchingServerAddress);
-            var client = new IngameMatchControl.IngameMatchControlClient(channel);
-            await client.RegisterServerAsync(new RegisterServerRequest
-            {
-                ServerId = _options.InstanceId,
-                ServerType = _options.ServerType,
-                Address = _options.SelfAddress,
-            }, cancellationToken: stoppingToken);
-
-            _logger.LogInformation("매칭 서버에 로비 등록 완료: {InstanceId} @ {Address}",
-                _options.InstanceId, _options.SelfAddress);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            // 앱 종료 중 정상 취소
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "매칭 서버에 로비 등록 실패: {InstanceId}", _options.InstanceId);
         }
     }
 

@@ -1,8 +1,7 @@
 using Grpc.Core;
-using Grpc.Net.Client;
 using IngameServer;
 using MainServer.Common.MasterConnection;
-using MatchingServer;
+using MainServer.Common.MatchConnection;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Redis;
@@ -15,25 +14,78 @@ namespace GameAgent.Services;
 ///
 /// 게임 서버가 연결되면:
 /// 1. 송수신 루프를 시작한다.
-/// 2. 게임 서버가 ServerReady를 보내면 마스터 서버에 접속한다.
-/// 3. 마스터에서 OpenRoom이 오면 게임 서버에 릴레이한다.
-/// 4. 게임 서버가 RoomOpened를 보내면 마스터에 보고한다.
-/// 5. 게임 서버가 ApprovalRequest를 보내면 Redis에서 세션/토큰 검증 후 ApprovalResponse를 반환한다.
+/// 2. 게임 서버가 ServerReady를 보내면 마스터 서버에 접속하고, 매칭 서버 접속도 시작한다
+///    (MatchServerConnection.SignalReady - 그 전까지는 매칭 후보가 되면 안 되므로 접속을 미뤄둔다).
+/// 3. IngameMatchService가 RequestOpenRoomAsync를 호출하면 OpenRoom을 게임 서버로 보내고,
+///    대응하는 RoomOpened가 올 때까지 기다린다 (roomId로 상관관계 추적).
+/// 4. 게임 서버가 RoomOpened를 보내면 대기 중인 요청을 풀어준다.
+/// 5. 게임 서버가 ApprovalRequest를 보내면 Redis에서 세션/권한 검증 후 ApprovalResponse를 반환한다.
+///
+/// 연결이 끊기면(하트비트 타임아웃 포함) 대기 중이던 모든 방 생성 요청을 일괄 실패 처리한다 -
+/// 보고할 곳이 없어졌으니, 계산이 끝났든 안 끝났든 전부 무효로 본다.
+///
+/// 매칭 서버에서의 해제(연결 종료 시)는 이제 별도 RPC 호출이 필요 없다 - MatchServerConnection의
+/// 스트림이 이 프로세스 종료와 함께 끊기면 매칭 서버가 즉시 서버 풀에서 제거한다.
 /// </summary>
 public sealed class GameServerHandler
 {
     private readonly MasterConnectionService _masterConnection;
+    private readonly MatchServerConnection _matchServerConnection;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ILogger<GameServerHandler> _logger;
     private GameServerInfo? _serverInfo;
+
+    // 게임 서버와의 비동기 왕복 업무 추적. 종류가 늘어나도 이 필드 하나로 다 담는다.
+    private readonly PendingWorkTracker _pendingWork = new();
+
     public GameServerHandler(
         MasterConnectionService masterConnection,
+        MatchServerConnection matchServerConnection,
         ISessionRegistry sessionRegistry,
         ILogger<GameServerHandler> logger)
     {
         _masterConnection = masterConnection;
+        _matchServerConnection = matchServerConnection;
         _sessionRegistry = sessionRegistry;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 게임 서버에 방 생성을 요청하고, RoomOpened 응답이 올 때까지 기다린다.
+    /// IngameMatchService.PrepareMatch가 이 메서드를 호출한다.
+    /// 연결이 끊기면(하트비트 타임아웃 포함) 이 Task는 예외로 끝난다 - HandleAsync의
+    /// finally에서 대기 중이던 모든 요청을 일괄 실패 처리하기 때문이다.
+    /// </summary>
+    public Task<RoomOpened> RequestOpenRoomAsync(
+        string roomId, IReadOnlyList<string> playerIds, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (_serverInfo == null || !_serverInfo.IsReady)
+        {
+            throw new InvalidOperationException("게임 서버가 준비되지 않았습니다.");
+        }
+
+        // WaitForAsync를 호출하면 그 안의 등록(TryAdd)까지는 동기적으로 끝난다
+        // (C# async 메서드는 첫 진짜 await 전까지 호출한 스레드에서 그대로 실행된다).
+        // 그러니 메시지를 보내기 전에 반드시 이 호출을 먼저 해서 등록부터 확정해야 한다 -
+        // 순서가 바뀌면 응답이 극단적으로 빨리 와서 등록 전에 도착해버리는 경합이 생긴다.
+        var waitTask = _pendingWork.WaitForAsync<RoomOpened>(roomId, timeout, cancellationToken);
+
+        var written = _serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
+        {
+            OpenRoom = new OpenRoom
+            {
+                RoomId = roomId,
+                PlayerIds = { playerIds },
+                TimestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            },
+        });
+
+        if (!written)
+        {
+            throw new InvalidOperationException("게임 서버에 메시지를 보낼 수 없습니다 (큐 닫힘).");
+        }
+
+        return waitTask;
     }
 
     public async Task HandleAsync(
@@ -63,27 +115,13 @@ public sealed class GameServerHandler
         {
             _logger.LogInformation("게임 서버 연결 종료");
 
+            // 보고할 곳이 없어졌다 - 계산이 끝났든 안 끝났든, 대기 중이던 업무는
+            // 전부 무효로 본다 (개별 결과를 살릴 방법이 없으므로 일괄 실패 처리).
+            _pendingWork.Cleanup("게임 서버 연결이 끊겼습니다.");
+
             if (_serverInfo.IsReady)
             {
                 _masterConnection.UpdateStatus(currentLoad: 0, capacity: 0);
-
-                // 매칭 서버에서 해제
-                if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
-                {
-                    try
-                    {
-                        using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
-                        var client = new IngameMatchControl.IngameMatchControlClient(channel);
-                        await client.UnregisterServerAsync(new UnregisterServerRequest
-                        {
-                            ServerId = _masterConnection.InstanceId,
-                        }, cancellationToken: CancellationToken.None);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "매칭 서버 해제 실패");
-                    }
-                }
             }
         }
     }
@@ -222,19 +260,11 @@ public sealed class GameServerHandler
 
         _masterConnection.UpdateStatus(currentLoad: 0, capacity: ready.Capacity);
 
-        // 매칭 서버에 자신을 등록
-        if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
-        {
-            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
-            var client = new IngameMatchControl.IngameMatchControlClient(channel);
-            await client.RegisterServerAsync(new RegisterServerRequest
-            {
-                ServerId = _masterConnection.InstanceId,
-                ServerType = GameServer.Common.ServerType.Ingame,
-                Address = _masterConnection.SelfAddress,
-            });
-            _logger.LogInformation("매칭 서버에 등록 완료");
-        }
+        // 매칭 서버 접속 시작 - 그 전까지는 매칭 후보가 되면 안 되므로 여기서 신호를 준다.
+        _matchServerConnection.SignalReady();
+        _logger.LogInformation("매칭 서버 접속 신호 전송");
+
+        await Task.CompletedTask;
     }
 
     private void HandleRoomOpened(RoomOpened roomOpened)
@@ -248,6 +278,14 @@ public sealed class GameServerHandler
             _logger.LogError("방 열기 실패: RoomId={RoomId} Error={Error}",
                 roomOpened.RoomId, roomOpened.ErrorMessage);
         }
+
+        if (_pendingWork.TryComplete(roomOpened.RoomId, roomOpened))
+        {
+            return;
+        }
+
+        _logger.LogWarning("대기 중이 아닌 RoomOpened 수신 (이미 타임아웃/연결끊김으로 처리됐을 수 있음): RoomId={RoomId}",
+            roomOpened.RoomId);
     }
 
     private async Task HandleMatchResultAsync(MatchResult result)
@@ -286,7 +324,7 @@ public sealed class GameServerHandler
         {
             // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인
             var claimed = await _sessionRegistry.TryClaimOwnershipAsync(
-                _masterConnection.InstanceId, request.PlayerId);
+                _masterConnection.InstanceId, request.PlayerId, session);
 
             if (!claimed)
             {

@@ -5,8 +5,13 @@ using Microsoft.Extensions.Logging;
 namespace MatchingServer.Services;
 
 /// <summary>
-/// 매칭 서버가 로비 서버와 게임 에이전트에 직접 gRPC 콜백을 호출하는 클라이언트.
-/// 매칭 확정/취소 통보, PrepareMatch 요청에 사용한다.
+/// 매칭 서버가 게임 에이전트에 직접 gRPC 요청을 호출하는 클라이언트.
+/// PrepareMatch(요청-응답이 필요)에만 쓴다.
+///
+/// 로비 서버에 대한 매칭 확정/취소 통보는 더 이상 이 클래스가 하지 않는다 -
+/// 로비가 MatchConnectionControl.Connect 스트림으로 매칭 서버에 접속을 유지하고 있으므로,
+/// MatchEngine이 ConnectedServerRegistry.Enqueue로 그 스트림에 바로 실어 보낸다
+/// (별도 주소 조회나 새 채널을 열 필요가 없다).
 /// </summary>
 public sealed class MatchCallbackClient
 {
@@ -15,64 +20,6 @@ public sealed class MatchCallbackClient
     public MatchCallbackClient(ILogger<MatchCallbackClient> logger)
     {
         _logger = logger;
-    }
-
-    /// <summary>로비 서버에 매칭 확정을 통보한다.</summary>
-    public async Task NotifyMatchConfirmedAsync(
-        string lobbyAddress,
-        string playerId,
-        string ingameServerId,
-        string ingameAddress
-        )
-    {
-        try
-        {
-            using var channel = GrpcChannel.ForAddress(lobbyAddress);
-            var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
-
-            await client.NotifyMatchAsync(new MatchNotification
-            {
-                Confirmed = new MatchConfirmed
-                {
-                    PlayerId = playerId,
-                    IngameServerId = ingameServerId,
-                    IngameAddress = ingameAddress,
-                }
-            });
-
-            _logger.LogInformation("매칭 확정 통보: {PlayerId} → {IngameServerId}", playerId, ingameServerId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "매칭 확정 통보 실패: {PlayerId}", playerId);
-        }
-    }
-
-    public async Task NotifyMatchCancelledAsync(
-        string lobbyAddress,
-        string playerId,
-        string reason)
-    {
-        try
-        {
-            using var channel = GrpcChannel.ForAddress(lobbyAddress);
-            var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
-
-            await client.NotifyMatchAsync(new MatchNotification
-            {
-                Cancelled = new MatchCancelled
-                {
-                    PlayerId = playerId,
-                    Reason = reason,
-                },
-            });
-
-            _logger.LogInformation("매칭 취소 통보: {PlayerId} ({Reason})", playerId, reason);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "매칭 취소 통보 실패: {PlayerId}", playerId);
-        }
     }
 
     /// <summary>게임 에이전트에 매치 준비를 요청한다.</summary>

@@ -8,46 +8,45 @@ option csharp_namespace = "MatchingServer";
 // 매칭 서버는 범용 라우팅/매칭 엔진으로 플레이어 풀과 서버 풀을 관리한다.
 //
 // 서비스:
-//   LobbyMatchControl  ← 로비 서버 ↔ 매칭 서버
-//   IngameMatchControl ← 게임 에이전트 ↔ 매칭 서버
+//   MatchConnectionControl ← 로비/게임 에이전트가 매칭 서버에 접속을 유지하는 양방향 스트림.
+//                            등록/생존 감지/매칭 서버→로비 알림(NotifyMatch)을 전부 이걸로 처리한다.
+//                            (MasterServer의 Connect 패턴과 동일 - 스트림이 끊기면 즉시 서버 풀에서
+//                            제거되므로, 예전처럼 RegisterServer/UnregisterServer 단발 호출 + Redis
+//                            TTL 폴링에 기대지 않아도 된다.)
+//   LobbyMatchControl      ← 로비 서버 → 매칭 서버 (요청-응답이 필요한 것만 단항으로 유지)
+//   IngameMatchControl     ← 게임 에이전트 ↔ 매칭 서버 (요청-응답이 필요한 것만 단항으로 유지)
 
-// =====================
-// 로비 서버 ↔ 매칭 서버
-// =====================
+// ==========================================
+// 접속 유지 (로비/게임 에이전트 → 매칭 서버)
+// ==========================================
 
-service LobbyMatchControl {
-  // 로비 서버 → 매칭 서버: 플레이어 매칭 요청
-  rpc JoinMatch(JoinMatchRequest) returns (JoinMatchResponse);
-
-  // 로비 서버 → 매칭 서버: 플레이어 매칭 취소
-  rpc LeaveMatch(LeaveMatchRequest) returns (LeaveMatchResponse);
-
-  // 매칭 서버 → 로비 서버: 매칭 결과 통보
-  // MatchConfirmed 또는 MatchCancelled
-  rpc NotifyMatch(MatchNotification) returns (MatchNotificationResponse);
+service MatchConnectionControl {
+  rpc Connect(stream ServerToMatchMessage) returns (stream MatchToServerMessage);
 }
 
-message JoinMatchRequest {
-  string player_id = 1;
-  string lobby_server_id = 2;  // 결과를 어느 로비에 통보할지
-  int32 skill_score = 3;       // 더미: 추후 실력 기반 매칭 구현 시 사용
+message ServerToMatchMessage {
+  oneof payload {
+    MatchConnectionHeartbeat heartbeat = 1;
+    MatchConnectionStatus status = 2;  // 최초 접속 시 1회 - 등록을 대체한다
+  }
 }
 
-message JoinMatchResponse {
-  bool success = 1;
-  string error_message = 2;
+message MatchConnectionStatus {
+  string server_id = 1;
+  ServerType server_type = 2;   // Lobby 또는 Ingame
+  string address = 3;           // 매칭 서버가 필요 시 콜백/조회에 쓸 주소
 }
 
-message LeaveMatchRequest {
-  string player_id = 1;
+message MatchConnectionHeartbeat {}
+
+message MatchToServerMessage {
+  oneof payload {
+    MatchConnectionHeartbeat heartbeat = 1;
+    MatchNotification match_notification = 2;  // 로비 전용 - 매칭 확정/취소 통보
+  }
 }
 
-message LeaveMatchResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-
-// 매칭 서버 → 로비 서버 결과 통보
+// 매칭 서버 → 로비 서버 결과 통보 (위 스트림에 실어 보낸다. 응답 불필요 - 알림성이라 fire-and-forget)
 message MatchNotification {
   oneof result {
     MatchConfirmed confirmed = 1;
@@ -66,8 +65,36 @@ message MatchCancelled {
   string reason = 2;  // 취소 사유 (타임아웃 등)
 }
 
-message MatchNotificationResponse {
+// =====================
+// 로비 서버 → 매칭 서버
+// =====================
+
+service LobbyMatchControl {
+  // 로비 서버 → 매칭 서버: 플레이어 매칭 요청
+  rpc JoinMatch(JoinMatchRequest) returns (JoinMatchResponse);
+
+  // 로비 서버 → 매칭 서버: 플레이어 매칭 취소
+  rpc LeaveMatch(LeaveMatchRequest) returns (LeaveMatchResponse);
+}
+
+message JoinMatchRequest {
+  string player_id = 1;
+  string lobby_server_id = 2;  // 결과를 어느 로비에 통보할지 (MatchConnectionStatus로 등록한 server_id)
+  int32 skill_score = 3;       // 더미: 추후 실력 기반 매칭 구현 시 사용
+}
+
+message JoinMatchResponse {
   bool success = 1;
+  string error_message = 2;
+}
+
+message LeaveMatchRequest {
+  string player_id = 1;
+}
+
+message LeaveMatchResponse {
+  bool success = 1;
+  string error_message = 2;
 }
 
 // ==========================
@@ -75,36 +102,11 @@ message MatchNotificationResponse {
 // ==========================
 
 service IngameMatchControl {
-  // 게임 에이전트 → 매칭 서버: 서버 등록
-  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
-
-  // 게임 에이전트 → 매칭 서버: 서버 해제 (정상 종료 시)
-  rpc UnregisterServer(UnregisterServerRequest) returns (UnregisterServerResponse);
-
   // 매칭 서버 → 게임 에이전트: 매치 준비 요청
   rpc PrepareMatch(PrepareMatchRequest) returns (PrepareMatchResponse);
 
   // 게임 에이전트 → 매칭 서버: 매치 준비 결과
   rpc PrepareMatchResult(PrepareMatchResultRequest) returns (PrepareMatchResultResponse);
-}
-
-message RegisterServerRequest {
-  string server_id = 1;
-  ServerType server_type = 2;
-  string address = 3;  // 매칭 서버가 콜백할 주소
-}
-
-message RegisterServerResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-
-message UnregisterServerRequest {
-  string server_id = 1;
-}
-
-message UnregisterServerResponse {
-  bool success = 1;
 }
 
 message PrepareMatchRequest {

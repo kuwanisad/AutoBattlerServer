@@ -19,6 +19,11 @@ service LobbyControl {
   // === 세션 (토큰 필요) ===
   rpc Logout(LogoutRequest) returns (LogoutResponse);
 
+  // 로그인 직후 클라가 호출한다. 이 로비가 플레이어 관리 권한을 가져올 수 있는지 확인한다.
+  // 다른 서버(주로 인게임)가 아직 살아있는 채로 권한을 갖고 있으면 거부되고,
+  // 그 서버 주소를 돌려준다 - 클라는 이걸로 "진행 중인 게임이 있습니다" 안내를 띄울 수 있다.
+  rpc EnterLobby(EnterLobbyRequest) returns (EnterLobbyResponse);
+
   // === 매치메이킹 (토큰 필요) ===
   // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
   // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
@@ -62,6 +67,17 @@ message LogoutRequest {}
 
 message LogoutResponse {
   bool success = 1;
+}
+
+message EnterLobbyRequest {}
+
+message EnterLobbyResponse {
+  bool success = 1;
+  string error_message = 2;
+
+  // success = false이고 이게 true면, 다른 서버가 아직 이 플레이어를 살아서 소유 중이라는 뜻.
+  bool has_conflicting_session = 3;
+  string conflicting_server_address = 4;  // 클라가 "진행 중인 게임이 있습니다" 안내에 쓸 주소
 }
 
 // === 매치메이킹 ===

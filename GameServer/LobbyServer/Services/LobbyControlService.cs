@@ -7,7 +7,6 @@ using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Redis;
-using System.Collections.Concurrent;
 
 namespace LobbyServer.Services;
 
@@ -16,28 +15,28 @@ namespace LobbyServer.Services;
 /// AuthInterceptor가 토큰 검증을 먼저 처리하고, 이 서비스는 실제 로직만 담당한다.
 ///
 /// RequestMatch: 매칭 서버에 JoinMatch 요청 후 스트림 대기.
-/// NotifyMatch: 매칭 서버가 결과를 통보하면 해당 플레이어 스트림으로 전달.
+/// 매칭 결과 통보는 MatchNotificationDispatcher(매칭 서버와의 상시 접속 스트림 수신부)가
+/// 처리해서 그 스트림으로 전달한다 - 여기서는 스트림을 등록/해제만 한다.
 /// </summary>
 public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 {
     private readonly ITokenProvider _tokenProvider;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly MasterConnectionService _masterConnection;
+    private readonly MatchNotificationDispatcher _notificationDispatcher;
     private readonly ILogger<LobbyControlService> _logger;
-
-    // playerId → (스트림, CancellationTokenSource)
-    // RequestMatch가 열린 스트림을 여기에 등록해두고 NotifyMatch가 오면 찾아서 전달한다.
-    private static readonly ConcurrentDictionary<string, PendingMatch> _pendingStreams = new();
 
     public LobbyControlService(
         ITokenProvider tokenProvider,
         ISessionRegistry sessionRegistry,
         MasterConnectionService masterConnection,
+        MatchNotificationDispatcher notificationDispatcher,
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
         _sessionRegistry = sessionRegistry;
         _masterConnection = masterConnection;
+        _notificationDispatcher = notificationDispatcher;
         _logger = logger;
     }
 
@@ -54,14 +53,8 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             };
         }
 
+        // 순수 인증만 담당한다 - 세션/소유권 관련 처리는 EnterLobby에서 한다.
         var token = _tokenProvider.GenerateToken(request.PlayerId);
-
-        await _sessionRegistry.RegisterAsync(request.PlayerId, new PlayerSession
-        {
-            Status = PlayerStatus.Lobby,
-            CurrentServer = context.Host,
-            OwnerServerId = _masterConnection.InstanceId,
-        });
 
         _logger.LogInformation("로그인 성공: {PlayerId}", request.PlayerId);
 
@@ -85,14 +78,8 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             };
         }
 
+        // Login과 마찬가지로 순수 인증만 담당한다.
         var token = _tokenProvider.GenerateToken(request.PlayerId);
-
-        await _sessionRegistry.RegisterAsync(request.PlayerId, new PlayerSession
-        {
-            Status = PlayerStatus.Lobby,
-            CurrentServer = context.Host,
-            OwnerServerId = _masterConnection.InstanceId,
-        });
 
         _logger.LogInformation("계정 생성 성공: {PlayerId}", request.PlayerId);
 
@@ -112,6 +99,45 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             await _sessionRegistry.RemoveAsync(playerId);
 
         return new LogoutResponse { Success = true };
+    }
+
+    /// <summary>
+    /// 로그인 직후 클라가 호출한다. 이 로비가 플레이어 관리 권한을 가져올 수 있는지 확인하고,
+    /// 못 가져오면(다른 서버가 아직 살아서 소유 중이면) 그 서버 주소를 돌려준다.
+    /// 클라는 이걸로 "진행 중인 게임이 있습니다" 안내를 띄울 수 있다.
+    /// </summary>
+    public override async Task<EnterLobbyResponse> EnterLobby(EnterLobbyRequest request, ServerCallContext context)
+    {
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId))
+        {
+            return new EnterLobbyResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+        }
+
+        var newSession = new PlayerSession
+        {
+            Status = PlayerStatus.Lobby,
+            CurrentServer = context.Host,
+        };
+
+        var result = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
+            _masterConnection.InstanceId, playerId, newSession);
+
+        if (result.Claimed)
+        {
+            _logger.LogInformation("로비 입장: {PlayerId}", playerId);
+            return new EnterLobbyResponse { Success = true };
+        }
+
+        _logger.LogInformation("로비 입장 거부 - 다른 서버가 아직 소유 중: {PlayerId} @ {Address}",
+            playerId, result.PreviousOwner?.Address);
+
+        return new EnterLobbyResponse
+        {
+            Success = false,
+            HasConflictingSession = true,
+            ConflictingServerAddress = result.PreviousOwner?.Address ?? string.Empty,
+        };
     }
 
     public override async Task RequestMatch(
@@ -139,7 +165,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             await _sessionRegistry.UpdateAsync(playerId, session);
         }
 
-        // 매칭 서버에 JoinMatch 요청
+        // 매칭 서버에 JoinMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김)
         if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
         {
             using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
@@ -162,10 +188,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             Queued = new MatchQueued { QueuePosition = 1, EstimatedWaitMs = 0 },
         });
 
-        // 스트림 등록 후 결과 대기
+        // 디스패처에 등록 후 결과 대기 (결과는 MatchNotificationDispatcher가 전달)
         var cts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
-        var pending = new PendingMatch { Stream = responseStream, Cts = cts };
-        _pendingStreams[playerId] = pending;
+        _notificationDispatcher.Register(playerId, responseStream, cts);
 
         try
         {
@@ -174,7 +199,39 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         catch (OperationCanceledException) { }
         finally
         {
-            _pendingStreams.TryRemove(playerId, out _);
+            _notificationDispatcher.TryUnregister(playerId, out _);
+
+            // context.CancellationToken이 취소됐다는 건 클라 연결 자체가 끊겼다는 뜻이다
+            // (매치 결과가 도착해서 취소된 거면 MatchNotificationDispatcher가 자기 cts만
+            // 따로 취소하지, 클라의 링크된 토큰까지 취소시키진 않는다).
+            // 이 경우에만 매칭 서버에서도 빼달라고 요청한다 - 이미 매치 결과로 빠진 경우
+            // 또 부르면 매칭 서버 쪽에서 "대기 중이 아닌 플레이어" 경고만 찍히고 실익이 없다.
+            if (context.CancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("매칭 중 클라 접속 끊김 - LeaveMatch 요청: {PlayerId}", playerId);
+                await RequestLeaveMatchAsync(playerId);
+            }
+        }
+    }
+
+    /// <summary>매칭 서버에 LeaveMatch를 요청한다. CancelMatch와 접속 끊김 자동 처리 양쪽에서 쓴다.</summary>
+    private async Task RequestLeaveMatchAsync(string playerId)
+    {
+        if (string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+        {
+            _logger.LogWarning("매칭 서버 주소 없음 - LeaveMatch 요청 실패: {PlayerId}", playerId);
+            return;
+        }
+
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+            var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
+            await client.LeaveMatchAsync(new LeaveMatchRequest { PlayerId = playerId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "LeaveMatch 요청 실패: {PlayerId}", playerId);
         }
     }
 
@@ -185,13 +242,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 
         if (!string.IsNullOrEmpty(playerId))
         {
-            // 매칭 서버에 LeaveMatch 요청
-            if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
-            {
-                using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
-                var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
-                await client.LeaveMatchAsync(new LeaveMatchRequest { PlayerId = playerId });
-            }
+            await RequestLeaveMatchAsync(playerId);
 
             // 세션 Lobby로 복원
             var session = await _sessionRegistry.GetAsync(playerId);
@@ -203,95 +254,10 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             }
 
             // 대기 중인 스트림 취소
-            if (_pendingStreams.TryRemove(playerId, out var pending))
-                pending.Cts.Cancel();
+            if (_notificationDispatcher.TryUnregister(playerId, out var cts))
+                cts?.Cancel();
         }
 
         return new CancelMatchResponse { Success = true };
-    }
-
-    public override async Task<MatchNotificationResponse> NotifyMatch(
-        MatchNotification request, ServerCallContext context)
-    {
-        string playerId;
-        bool isConfirmed;
-
-        switch (request.ResultCase)
-        {
-            case MatchNotification.ResultOneofCase.Confirmed:
-                playerId = request.Confirmed.PlayerId;
-                isConfirmed = true;
-                break;
-            case MatchNotification.ResultOneofCase.Cancelled:
-                playerId = request.Cancelled.PlayerId;
-                isConfirmed = false;
-                break;
-            default:
-                return new MatchNotificationResponse { Success = false };
-        }
-
-        if (!_pendingStreams.TryGetValue(playerId, out var pending))
-        {
-            _logger.LogWarning("NotifyMatch - 대기 중인 스트림 없음: {PlayerId}", playerId);
-            return new MatchNotificationResponse { Success = false };
-        }
-
-        if (isConfirmed)
-        {
-            var confirmed = request.Confirmed;
-
-            // 세션 Moving으로 업데이트 + OwnerServerId를 인게임 서버로 이전
-            var session = await _sessionRegistry.GetAsync(playerId);
-            if (session != null)
-            {
-                session.Status = PlayerStatus.Moving;
-                session.NextServer = confirmed.IngameAddress;
-                session.OwnerServerId = confirmed.IngameServerId;
-                await _sessionRegistry.UpdateAsync(playerId, session);
-            }
-
-            await pending.Stream.WriteAsync(new MatchEvent
-            {
-                MatchFound = new MatchFound
-                {
-                    MatchId = Guid.NewGuid().ToString("N"),
-                    GameServerAddress = confirmed.IngameAddress,
-                    IngameServerId = confirmed.IngameServerId,
-                    TimestampUnixMs = TimeUtils.CurrentTimestamp(),
-                },
-            });
-
-            _logger.LogInformation("매치 확정 전달: {PlayerId} → {Server}",
-                playerId, confirmed.IngameAddress);
-        }
-        else
-        {
-            var session = await _sessionRegistry.GetAsync(playerId);
-            if (session != null)
-            {
-                session.Status = PlayerStatus.Lobby;
-                session.NextServer = string.Empty;
-                await _sessionRegistry.UpdateAsync(playerId, session);
-            }
-
-            await pending.Stream.WriteAsync(new MatchEvent
-            {
-                MatchFailed = new MatchFailed { Reason = request.Cancelled.Reason },
-            });
-
-            _logger.LogInformation("매칭 취소 전달: {PlayerId} ({Reason})",
-                playerId, request.Cancelled.Reason);
-        }
-
-        // 스트림 종료
-        pending.Cts.Cancel();
-
-        return new MatchNotificationResponse { Success = true };
-    }
-
-    private sealed class PendingMatch
-    {
-        public IServerStreamWriter<MatchEvent> Stream { get; set; } = null!;
-        public CancellationTokenSource Cts { get; set; } = null!;
     }
 }

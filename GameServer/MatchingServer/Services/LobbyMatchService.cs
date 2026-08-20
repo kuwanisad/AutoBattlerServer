@@ -6,7 +6,9 @@ namespace MatchingServer.Services;
 
 /// <summary>
 /// 로비 서버가 호출하는 gRPC 서비스.
-/// JoinMatch, LeaveMatch를 처리한다.
+/// JoinMatch, LeaveMatch를 처리한다 (요청-응답이 필요한 것만 단항으로 남아있다).
+/// 매칭 결과 통보(NotifyMatch)는 이제 MatchConnectionControl.Connect 스트림으로 처리하므로
+/// 여기 없다 - MatchConnectionService/MatchEngine 참고.
 /// </summary>
 public sealed class LobbyMatchService : LobbyMatchControl.LobbyMatchControlBase
 {
@@ -33,12 +35,5 @@ public sealed class LobbyMatchService : LobbyMatchControl.LobbyMatchControlBase
     {
         var success = _matchEngine.LeaveMatch(request.PlayerId);
         return Task.FromResult(new LeaveMatchResponse { Success = success });
-    }
-
-    public override Task<MatchNotificationResponse> NotifyMatch(MatchNotification request, ServerCallContext context)
-    {
-        // 매칭 서버가 로비 서버에 통보하는 RPC이므로 여기서는 구현하지 않는다.
-        // 실제 구현은 로비 서버의 LobbyMatchService에 있다.
-        throw new RpcException(new Status(StatusCode.Unimplemented, "매칭 서버는 이 RPC를 호출하지 않습니다."));
     }
 }

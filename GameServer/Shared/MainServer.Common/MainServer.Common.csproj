@@ -22,4 +22,8 @@
     <ProjectReference Include="..\Shared.Common\Shared.Common.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Ingame\" />
+  </ItemGroup>
+
 </Project>
