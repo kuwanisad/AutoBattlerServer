@@ -204,6 +204,36 @@ internal sealed class ConnectionHandler
             }
         }
 
+        // 계정 서버(AccountServer)도 매칭 서버와 완전히 같은 패턴 - 실제로는 로그인
+        // 서버만 이 주소를 쓰지만, 다른 서버 타입인지 여부를 안 가리고 똑같이 브로드캐스트한다
+        // (지금 매칭 서버 처리랑 구조적으로 일관성 유지 - 안 쓰는 서버는 그냥 무시하면 됨).
+        if (status.ServerType == ServerType.Account)
+        {
+            BroadcastAccountServerAddress(status.InstanceId, status.Address);
+        }
+        else
+        {
+            var accountServer = _registry.GetByType(ServerType.Account).FirstOrDefault();
+            if (accountServer != null)
+            {
+                _registry.Enqueue(status.InstanceId, new MasterMessage
+                {
+                    AccountServer = new AccountServerInfo { Address = accountServer.Address },
+                });
+
+                _logger.LogInformation(
+                    "계정 서버 주소 전달: {InstanceId} ← {AccountAddress}",
+                    status.InstanceId, accountServer.Address);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "메인 서버 접속({InstanceId})했으나 계정 서버가 아직 등록되지 않음. " +
+                    "로그인 서버라면 기동 순서를 확인하세요.",
+                    status.InstanceId);
+            }
+        }
+
         // 세션 레지스트리(Redis) 주소는 마스터가 자체 설정(shared.appsettings.json)에서
         // 정적으로 알고 있으므로, 매칭 서버와 달리 등록 순서와 무관하게 항상 바로 전달한다.
         // 매칭 서버 자신도 ISessionRegistry를 쓰므로 타입 구분 없이 전달한다.
@@ -241,6 +271,28 @@ internal sealed class ConnectionHandler
         _logger.LogInformation(
             "매칭 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
             matchingInstanceId, matchingAddress, recipients.Count);
+    }
+
+    /// <summary>매칭 서버와 같은 이유로 존재하는 계정 서버 버전. BroadcastMatchingServerAddress 참고.</summary>
+    private void BroadcastAccountServerAddress(string accountInstanceId, string accountAddress)
+    {
+        var message = new MasterMessage
+        {
+            AccountServer = new AccountServerInfo { Address = accountAddress },
+        };
+
+        var recipients = _registry.GetAll()
+            .Where(i => i.ServerType != ServerType.Account)
+            .ToList();
+
+        foreach (var instance in recipients)
+        {
+            _registry.Enqueue(instance.InstanceId, message);
+        }
+
+        _logger.LogInformation(
+            "계정 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
+            accountInstanceId, accountAddress, recipients.Count);
     }
 
     private async Task SendLoopAsync(

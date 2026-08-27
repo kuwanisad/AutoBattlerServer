@@ -1,4 +1,4 @@
-﻿using Grpc.Net.Client;
+using Grpc.Net.Client;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 
@@ -26,7 +26,8 @@ public sealed class MatchCallbackClient
     public async Task<bool> PrepareMatchAsync(
         string ingameAddress,
         string matchId,
-        List<string> playerIds)
+        List<string> playerIds,
+        GameServer.Common.GameType gameType)
     {
         try
         {
@@ -37,6 +38,7 @@ public sealed class MatchCallbackClient
             {
                 MatchId = matchId,
                 PlayerIds = { playerIds },
+                GameType = gameType,
             });
 
             _logger.LogInformation("PrepareMatch 응답: {MatchId} accepted={Accepted}",
@@ -48,6 +50,32 @@ public sealed class MatchCallbackClient
         {
             _logger.LogError(ex, "PrepareMatch 실패: {MatchId}", matchId);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 게임 에이전트에 이미 요청했던 방 취소를 요청한다. PrepareMatch가 수락된 이후
+    /// 매치가 중단되면 호출한다 - 실패해도(게임 에이전트가 이미 죽었다거나) 어차피
+    /// HandleServerDisconnected가 그 서버의 다른 매치들도 정리하고 있으므로 로그만 남긴다.
+    /// </summary>
+    public async Task CancelRoomAsync(string ingameAddress, string matchId, string reason)
+    {
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(ingameAddress);
+            var client = new IngameMatchControl.IngameMatchControlClient(channel);
+
+            await client.CancelRoomAsync(new CancelRoomRequest
+            {
+                MatchId = matchId,
+                Reason = reason,
+            });
+
+            _logger.LogInformation("CancelRoom 요청 완료: {MatchId}", matchId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "CancelRoom 요청 실패 (게임 에이전트가 이미 끊겼을 수 있음): {MatchId}", matchId);
         }
     }
 }

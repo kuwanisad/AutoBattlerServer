@@ -81,6 +81,7 @@ message JoinMatchRequest {
   string player_id = 1;
   string lobby_server_id = 2;  // 결과를 어느 로비에 통보할지 (MatchConnectionStatus로 등록한 server_id)
   int32 skill_score = 3;       // 더미: 추후 실력 기반 매칭 구현 시 사용
+  GameType game_type = 4;      // 어느 대기열에 넣을지 - 같은 game_type끼리만 매칭돼야 한다
 }
 
 message JoinMatchResponse {
@@ -107,11 +108,39 @@ service IngameMatchControl {
 
   // 게임 에이전트 → 매칭 서버: 매치 준비 결과
   rpc PrepareMatchResult(PrepareMatchResultRequest) returns (PrepareMatchResultResponse);
+
+  // 매칭 서버 → 게임 에이전트: 이미 요청했던 방을 취소한다.
+  // (PrepareMatch가 수락된 이후 - 즉 게임 에이전트가 실제로 게임 서버에 방 생성을 요청한
+  // 이후 - 클라/로비 접속이 끊기는 등으로 매치가 중단되면 호출한다.)
+  rpc CancelRoom(CancelRoomRequest) returns (CancelRoomResponse);
+
+  // 게임 에이전트 → 매칭 서버: 방이 취소/제거될 때, 그 방에 있던 클라들을 보낼 로비 주소를
+  // 요청한다. 어느 로비든 상관없으므로(로비는 서로 대체 가능) 특정 로비를 지정하지 않고
+  // "지금 접속 중인 로비 아무거나" 요청하는 형태다.
+  rpc RequestLobbyAddress(RequestLobbyAddressRequest) returns (RequestLobbyAddressResponse);
+}
+
+message CancelRoomRequest {
+  string match_id = 1;
+  string reason = 2;
+}
+
+message CancelRoomResponse {
+  bool acknowledged = 1;
+}
+
+message RequestLobbyAddressRequest {}
+
+message RequestLobbyAddressResponse {
+  bool found = 1;
+  string lobby_server_id = 2;
+  string address = 3;
 }
 
 message PrepareMatchRequest {
   string match_id = 1;
   repeated string player_ids = 2;  // 이 방에 들어올 플레이어 목록
+  GameType game_type = 3;          // 인게임 서버가 방 준비 시 룰(재접속 정책 등) 결정에 사용
 }
 
 message PrepareMatchResponse {
@@ -123,6 +152,9 @@ message PrepareMatchResultRequest {
   string match_id = 1;
   bool success = 2;
   string error_message = 3;  // 실패 시 사유
+  string ingame_address = 4; // success = true일 때 - 클라이언트가 NGO로 접속할 실제 주소
+                              // (게임 에이전트 자신의 gRPC 주소와 다름. ServerReady로 이미
+                              // 게임 에이전트가 받아둔 값을 그대로 실어보낸다.)
 }
 
 message PrepareMatchResultResponse {

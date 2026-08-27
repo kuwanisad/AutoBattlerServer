@@ -206,7 +206,12 @@ NGO 기반 인게임 서버다.
 서버 이동 중인 플레이어는 Redis에 `Moving` 상태로 기록된다. 해커가 타인인 척 다른 서버에 접속하려 해도 Redis의 `OwnerServerId` 원자적 검증으로 차단된다 (예전엔 `NextServer` + 일회용 `MatchToken` 조합이었으나, 매칭 서버가 게임 에이전트에 플레이어 명단을 직접 전달하는 구조로 바뀌면서 토큰이 불필요해졌다).
 
 ### JWT (클라이언트 ↔ 로비 서버)
-로비 서버와의 통신은 JWT로 인증한다. `AuthInterceptor`가 모든 gRPC 요청에서 토큰을 자동 검증한다. Login/CreateAccount는 토큰 없이 통과한다. 현재는 더미 토큰(`DummyTokenProvider`) 사용 중이며 추후 실제 JWT로 교체 예정.
+로비 서버와의 통신은 토큰으로 인증한다. `AuthInterceptor`가 모든 gRPC 요청에서 토큰을 자동 검증한다. `Login`/`CreateAccount`는 코드에서 제거됐다(별도 "로그인 서버"로 분리하는 게 맞는 방향이지만 나중 작업 - 지금은 `EnterLobby`부터 토큰이 필요한 임시 상태). 클라는 최초 접속 시 스스로 만든(사실상 playerId 그대로인) 토큰을 제출하고, `EnterLobby`가 성공하면 그 자리에서 `ITokenProvider.GenerateToken`으로 새 토큰을 발급해 돌려준다. `DummyTokenProvider`는 지금 어떤 문자열이든 그대로 playerId로 취급해 통과시키므로 실질적인 신원 검증이 없는 상태 - 로그인 서버가 생기기 전까지의 임시 조치.
+
+세션 레지스트리(`PlayerSession`)에 `CurrentToken`/`PreviousToken` 2슬롯과 `TokenIssuedAtUnixMs`(TTL 판단용)를 둔다. 갱신 권한은 `OwnerServerId`를 가진 서버만 갖는다 - 즉 지금 그 플레이어를 관리 중인 서버만 토큰을 새로 발급할 수 있다. 검증 지점은 이동 방향에 따라 다르다: **로비→인게임**은 게임 에이전트의 `ConnectionApproval`이 검증하고(서버 간 소통을 게임 에이전트가 대신하므로), **인게임→로비**는 로비의 `EnterLobby`가 검증한다. 실제 "제출된 토큰을 세션의 2슬롯과 대조해서 거부"하는 로직 자체는 아직 미구현(TODO) - 지금은 `EnterLobby`가 무조건 새로 발급하고, `ConnectionApproval`은 `OwnerServerId`만 보고 토큰은 안 본다.
 
 ### 서버 간 인증 (메인 서버 ↔ 마스터 서버)
 `IServerAuthenticator` 퍼사드로 마스터 서버에 접속하는 서버를 검증한다. 지금은 `DummyServerAuthenticator`(항상 통과)이고, 나중에 mTLS를 도입할 때 여러 검증 수단을 조합하는 `CompositeServerAuthenticator`로 교체할 수 있게 인터페이스를 미리 분리해뒀다. `ConnectionHandler`가 접속 시작 시 가장 먼저 이 검증을 거치고, 실패하면 `Unauthenticated`로 즉시 연결을 끊는다.
+
+### ⚠ 알려진 경합 - 클라 자진 이탈 vs 서버 강제 종료 (게임 종료 후 로비 복귀)
+게임 종료/방 취소 시, 인게임 서버는 클라에게 `CloseRoom`(리다이렉트 주소 포함)을 명시적 메시지로 보내고, 클라의 확인 응답을 기다린다. **클라는 확인 응답을 보낸 즉시(서버의 처리를 기다리지 않고) 스스로 NGO 연결을 끊고 새 로비로 이동을 시작**하고, **서버도 독립적으로(확인 응답을 받으면 곧장, 못 받으면 최대 5초 뒤) 자기 쪽에서 `DisconnectClient`를 호출**한다. 두 경로가 서로의 타이밍을 기다리지 않으므로, 아주 짧은 순간 "클라는 이미 끊었는데 서버는 아직 모르고 뒤늦게 `DisconnectClient`를 호출하려 하는" 경합이 생길 수 있다. 인게임 서버 쪽 `IngameServerInstance._clients`(`ConcurrentDictionary`)가 이 경합을 원자적으로 처리한다 - 서버가 끊으려는 시점에 그 클라가 이미 `_clients`에서 빠져있으면(클라가 먼저 끊어서 `OnClientDisconnected`가 이미 처리했으면) 그 시도를 무효로 돌린다. 실질적 위험(중복 처리, 잘못된 상태)은 없지만, 설계상 의도적으로 감수한 경합이라 기록해둔다.

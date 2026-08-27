@@ -1,5 +1,6 @@
 using Confluent.Kafka;
 using LobbyServer.Auth;
+using LobbyServer.Debug;
 using LobbyServer.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;

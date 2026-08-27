@@ -1,0 +1,91 @@
+using Grpc.Core;
+using Microsoft.Extensions.Logging;
+
+namespace AccountServer.Services;
+
+/// <summary>
+/// 로그인 서버가 호출하는 gRPC 서비스. 계정 검증/생성만 담당하는 순수 조회/생성 저장소라
+/// 매칭 서버처럼 접속 유지 스트림을 쓸 필요가 없다 - 단항 RPC로 충분하다.
+/// </summary>
+public sealed class AccountControlService : AccountControl.AccountControlBase
+{
+    // playerId(GUID) 충돌 시 재발급 최대 횟수. 122비트 무작위값이라 실질적으로 거의
+    // 발생하지 않지만(사실상 0에 가까운 확률), 비용이 거의 안 드는 선에서 방어해둔다.
+    private const int MaxPlayerIdRetries = 5;
+
+    private readonly IAccountRepository _repository;
+    private readonly ILogger<AccountControlService> _logger;
+
+    public AccountControlService(IAccountRepository repository, ILogger<AccountControlService> logger)
+    {
+        _repository = repository;
+        _logger = logger;
+    }
+
+    public override async Task<VerifyAccountResponse> VerifyAccount(
+        VerifyAccountRequest request, ServerCallContext context)
+    {
+        var record = await _repository.FindAsync(request.AccountId);
+
+        if (record == null || record.Password != request.Password)
+        {
+            _logger.LogInformation("계정 검증 실패: {AccountId}", request.AccountId);
+            return new VerifyAccountResponse { Found = false };
+        }
+
+        _logger.LogInformation("계정 검증 성공: {AccountId} → {PlayerId}", request.AccountId, record.PlayerId);
+        return new VerifyAccountResponse { Found = true, PlayerId = record.PlayerId };
+    }
+
+    public override async Task<CreateAccountResponse> CreateAccount(
+        CreateAccountRequest request, ServerCallContext context)
+    {
+        if (string.IsNullOrEmpty(request.AccountId) || string.IsNullOrEmpty(request.Password))
+        {
+            return new CreateAccountResponse { Success = false, ErrorMessage = "계정 ID와 비밀번호를 입력하세요." };
+        }
+
+        var playerId = await GenerateUniquePlayerIdAsync();
+        if (playerId == null)
+        {
+            // 이 분기는 사실상 도달 불가능하다(GUID 충돌 확률이 사실상 0) - 그래도 무한
+            // 루프 없이 명시적으로 실패 처리한다.
+            _logger.LogError("playerId 발급 실패 - {Retries}회 연속 충돌", MaxPlayerIdRetries);
+            return new CreateAccountResponse { Success = false, ErrorMessage = "일시적인 오류입니다. 다시 시도하세요." };
+        }
+
+        var record = new AccountRecord
+        {
+            AccountId = request.AccountId,
+            Password = request.Password,
+            PlayerId = playerId,
+            CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var created = await _repository.TryCreateAsync(record);
+        if (!created)
+        {
+            _logger.LogWarning("계정 생성 실패 - 이미 존재하는 계정: {AccountId}", request.AccountId);
+            return new CreateAccountResponse { Success = false, ErrorMessage = "이미 존재하는 계정입니다." };
+        }
+
+        _logger.LogInformation("계정 생성 성공: {AccountId} → {PlayerId}", request.AccountId, playerId);
+        return new CreateAccountResponse { Success = true, PlayerId = playerId };
+    }
+
+    private async Task<string?> GenerateUniquePlayerIdAsync()
+    {
+        for (var i = 0; i < MaxPlayerIdRetries; i++)
+        {
+            var candidate = Guid.NewGuid().ToString("N");
+            if (!await _repository.PlayerIdExistsAsync(candidate))
+            {
+                return candidate;
+            }
+
+            _logger.LogWarning("playerId 충돌(극히 드문 경우) - 재발급 시도 {Attempt}/{Max}", i + 1, MaxPlayerIdRetries);
+        }
+
+        return null;
+    }
+}

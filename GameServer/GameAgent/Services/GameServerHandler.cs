@@ -1,7 +1,9 @@
 using Grpc.Core;
+using Grpc.Net.Client;
 using IngameServer;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
+using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Redis;
@@ -20,6 +22,9 @@ namespace GameAgent.Services;
 ///    대응하는 RoomOpened가 올 때까지 기다린다 (roomId로 상관관계 추적).
 /// 4. 게임 서버가 RoomOpened를 보내면 대기 중인 요청을 풀어준다.
 /// 5. 게임 서버가 ApprovalRequest를 보내면 Redis에서 세션/권한 검증 후 ApprovalResponse를 반환한다.
+/// 6. 매칭 서버가 CancelRoom을 요청하면(매치가 중단됨) 그 방에 접속 중인 클라를 파악해서,
+///    있으면 매칭 서버에 로비 주소를 물어 세션 권한을 이전한 뒤 리다이렉트 정보와 함께
+///    게임 서버에 CloseRoom을 전달한다.
 ///
 /// 연결이 끊기면(하트비트 타임아웃 포함) 대기 중이던 모든 방 생성 요청을 일괄 실패 처리한다 -
 /// 보고할 곳이 없어졌으니, 계산이 끝났든 안 끝났든 전부 무효로 본다.
@@ -35,8 +40,36 @@ public sealed class GameServerHandler
     private readonly ILogger<GameServerHandler> _logger;
     private GameServerInfo? _serverInfo;
 
+    // ServerReady로 게임 서버(Unity)가 알려준, 클라이언트가 NGO로 실제 접속할 주소.
+    // _masterConnection.SelfAddress(게임 에이전트 자신의 gRPC 주소)와는 완전히 다른 값이다.
+    private string _clientAddress = string.Empty;
+
+    /// <summary>PrepareMatchResult 등에서 클라이언트에게 알려줄 실제 인게임 접속 주소.</summary>
+    public string ClientAddress => _clientAddress;
+
     // 게임 서버와의 비동기 왕복 업무 추적. 종류가 늘어나도 이 필드 하나로 다 담는다.
     private readonly PendingWorkTracker _pendingWork = new();
+
+    // 재접속 가능 여부 등 룰을 게임 타입별로 결정한다. 지금은 하드코딩된 정책이지만,
+    // 나중에 설정 파일/마스터에서 받아오는 방식으로 바뀔 수 있다.
+    private static readonly TimeSpan ReconnectGracePeriod = TimeSpan.FromSeconds(30);
+
+    private static bool GetAllowReconnect(GameServer.Common.GameType gameType) => gameType switch
+    {
+        GameServer.Common.GameType.Normal => true,
+        _ => false,
+    };
+
+    // roomId(=matchId) → 그 방에 지금 NGO로 접속해있는 playerId 목록.
+    // CancelRoom이 왔을 때 "누구를 어디로 리다이렉트해야 하는지" 판단하는 데 쓴다.
+    // 게임 서버 수신 루프(HandlePlayerJoinedAsync/Left)와 CancelRoom RPC(별도 gRPC 호출
+    // 컨텍스트, 다른 스레드일 수 있음) 양쪽에서 건드리므로 락으로 보호한다.
+    private readonly object _roomPlayersLock = new();
+    private readonly Dictionary<string, HashSet<string>> _roomPlayers = new();
+
+    // roomId → 그 방의 GameType. OpenRoom 보낼 때 기록해두고, HandlePlayerLeftAsync에서
+    // 재접속 허용 여부를 판단하는 데 쓴다. 같은 락으로 보호한다.
+    private readonly Dictionary<string, GameServer.Common.GameType> _roomGameType = new();
 
     public GameServerHandler(
         MasterConnectionService masterConnection,
@@ -57,11 +90,17 @@ public sealed class GameServerHandler
     /// finally에서 대기 중이던 모든 요청을 일괄 실패 처리하기 때문이다.
     /// </summary>
     public Task<RoomOpened> RequestOpenRoomAsync(
-        string roomId, IReadOnlyList<string> playerIds, TimeSpan timeout, CancellationToken cancellationToken)
+        string roomId, IReadOnlyList<string> playerIds, GameServer.Common.GameType gameType,
+        TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (_serverInfo == null || !_serverInfo.IsReady)
         {
             throw new InvalidOperationException("게임 서버가 준비되지 않았습니다.");
+        }
+
+        lock (_roomPlayersLock)
+        {
+            _roomGameType[roomId] = gameType;
         }
 
         // WaitForAsync를 호출하면 그 안의 등록(TryAdd)까지는 동기적으로 끝난다
@@ -77,6 +116,7 @@ public sealed class GameServerHandler
                 RoomId = roomId,
                 PlayerIds = { playerIds },
                 TimestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                GameType = gameType,
             },
         });
 
@@ -86,6 +126,104 @@ public sealed class GameServerHandler
         }
 
         return waitTask;
+    }
+
+    /// <summary>
+    /// 방을 닫고 그 안에 접속 중이던 클라들을 로비로 리다이렉트한다. 이유(취소든 정상 종료든)와
+    /// 무관하게 "방을 닫고 다 같이 로비로 보낸다"는 메커니즘 자체는 동일해서 하나로 통일했다 -
+    /// 매칭 서버의 CancelRoom 요청(IngameMatchService), 게임 서버 자체 방-채움 타임아웃
+    /// (RoomTimeout), 매치 정상 종료(MatchResult) 전부 이 메서드를 거친다.
+    /// 접속 중인 클라를 파악해서, 있으면 매칭 서버에 로비 주소를 물어 세션 권한을 이전한 뒤
+    /// 리다이렉트 정보와 함께 게임 서버에 CloseRoom을 보낸다. 접속 중인 클라가 없으면(또는
+    /// 리다이렉트할 로비를 못 찾으면) 그냥 방 제거만 요청한다.
+    /// </summary>
+    public async Task CloseRoomAndRedirectAsync(string matchId, string reason)
+    {
+        var connectedPlayerIds = new List<string>();
+        lock (_roomPlayersLock)
+        {
+            if (_roomPlayers.TryGetValue(matchId, out var players))
+            {
+                connectedPlayerIds.AddRange(players);
+            }
+            _roomPlayers.Remove(matchId);
+            _roomGameType.Remove(matchId);
+        }
+
+        var redirects = new List<PlayerRedirect>();
+
+        if (connectedPlayerIds.Count > 0)
+        {
+            var lobby = await RequestLobbyAddressAsync();
+
+            if (lobby != null)
+            {
+                foreach (var playerId in connectedPlayerIds)
+                {
+                    var session = await _sessionRegistry.GetAsync(playerId);
+                    if (session == null) continue;
+
+                    // 기존 소유자(이 게임 에이전트)가 살아있는 채로 자발적으로 넘겨주는 것이므로
+                    // TryClaimOwnershipAsync의 "기존 소유자 생존 확인" 절차를 그대로 타면 오히려
+                    // 거부당한다(자기 자신이 아직 살아있으니까) - 대신 새 소유자로 직접 갱신한다.
+                    session.Status = PlayerStatus.Moving;
+                    session.CurrentServer = string.Empty;
+                    session.NextServer = lobby.Value.Address;
+                    session.OwnerServerId = lobby.Value.ServerId;
+                    await _sessionRegistry.UpdateAsync(playerId, session);
+
+                    redirects.Add(new PlayerRedirect
+                    {
+                        PlayerId = playerId,
+                        LobbyAddress = lobby.Value.Address,
+                    });
+                }
+
+                _logger.LogInformation("방 종료 - {Count}명 리다이렉트 준비 완료: MatchId={MatchId} → {Address} ({Reason})",
+                    redirects.Count, matchId, lobby.Value.Address, reason);
+            }
+            else
+            {
+                _logger.LogWarning("방 종료 - 리다이렉트할 로비를 찾지 못함: MatchId={MatchId} ({Reason})", matchId, reason);
+            }
+        }
+
+        if (_serverInfo != null)
+        {
+            _serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
+            {
+                CloseRoom = new CloseRoom
+                {
+                    RoomId = matchId,
+                    Reason = reason,
+                    Redirects = { redirects },
+                },
+            });
+        }
+    }
+
+    /// <summary>매칭 서버에 "접속 중인 로비 아무거나 하나"를 요청한다.</summary>
+    private async Task<(string ServerId, string Address)?> RequestLobbyAddressAsync()
+    {
+        if (string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+        {
+            _logger.LogWarning("매칭 서버 주소 없음 - 로비 주소 요청 실패");
+            return null;
+        }
+
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+            var client = new IngameMatchControl.IngameMatchControlClient(channel);
+            var response = await client.RequestLobbyAddressAsync(new RequestLobbyAddressRequest());
+
+            return response.Found ? (response.LobbyServerId, response.Address) : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "로비 주소 요청 실패");
+            return null;
+        }
     }
 
     public async Task HandleAsync(
@@ -187,6 +325,13 @@ public sealed class GameServerHandler
                         await HandleApprovalRequestAsync(message.ApprovalRequest, serverInfo);
                         break;
 
+                    case GameServerMessage.PayloadOneofCase.RoomTimeout:
+                        // 게임 서버가 자체적으로 결원을 감지한 것 - CancelRoom과 같은 처리를
+                        // 그대로 재사용한다(수신 루프를 안 막게 fire-and-forget).
+                        _logger.LogWarning("게임 서버가 방-채움 타임아웃 보고: {RoomId}", message.RoomTimeout.RoomId);
+                        _ = CloseRoomAndRedirectAsync(message.RoomTimeout.RoomId, "방-채움 타임아웃 (결원)");
+                        break;
+
                     case GameServerMessage.PayloadOneofCase.None:
                         break;
 
@@ -255,8 +400,10 @@ public sealed class GameServerHandler
     {
         serverInfo.IsReady = true;
         serverInfo.Capacity = ready.Capacity;
+        _clientAddress = ready.ClientAddress;
 
-        _logger.LogInformation("게임 서버 준비 완료. Capacity={Capacity}", ready.Capacity);
+        _logger.LogInformation("게임 서버 준비 완료. Capacity={Capacity} ClientAddress={ClientAddress}",
+            ready.Capacity, ready.ClientAddress);
 
         _masterConnection.UpdateStatus(currentLoad: 0, capacity: ready.Capacity);
 
@@ -290,8 +437,14 @@ public sealed class GameServerHandler
 
     private async Task HandleMatchResultAsync(MatchResult result)
     {
-        _logger.LogInformation("매치 결과 수신: MatchId={MatchId}", result.MatchId);
-        await Task.CompletedTask;
+        _logger.LogInformation("매치 결과 수신: MatchId={MatchId} ({Count}명)", result.MatchId, result.Players.Count);
+
+        // 승패 판정/점수/보상 등 실제 게임 결과는 인게임 서버(진짜 권위)가 이미 정해서 보낸
+        // 것이다 - 게임 에이전트는 그 판단에 관여하지 않고, "정상적으로 끝났다"는 사실만
+        // 받아서 로비 복귀 처리만 담당한다("에이전트"라는 이름 그대로).
+        // TODO: 매치 결과(승패, 점수 등)를 Kafka에 발행해 기록/보상 처리하는 부분은 미구현.
+        //       result.Players에 담긴 순위/승패/획득 점수는 지금 아무 데도 안 쓰인다.
+        await CloseRoomAndRedirectAsync(result.MatchId, "매치 정상 종료");
     }
 
     private async Task HandleApprovalRequestAsync(ApprovalRequest request, GameServerInfo serverInfo)
@@ -354,6 +507,16 @@ public sealed class GameServerHandler
         _logger.LogInformation("플레이어 접속: {PlayerId} ({Load}/{Capacity})",
             joined.PlayerId, serverInfo.CurrentLoad, serverInfo.Capacity);
 
+        lock (_roomPlayersLock)
+        {
+            if (!_roomPlayers.TryGetValue(joined.RoomId, out var players))
+            {
+                players = new HashSet<string>();
+                _roomPlayers[joined.RoomId] = players;
+            }
+            players.Add(joined.PlayerId);
+        }
+
         var session = await _sessionRegistry.GetAsync(joined.PlayerId);
         if (session != null)
         {
@@ -378,15 +541,76 @@ public sealed class GameServerHandler
 
         serverInfo.RemoveClientMapping(left.PlayerId);
 
-        var session = await _sessionRegistry.GetAsync(left.PlayerId);
-        if (session != null)
+        GameServer.Common.GameType gameType;
+        lock (_roomPlayersLock)
         {
-            session.Status = PlayerStatus.Moving;
-            session.CurrentServer = string.Empty;
-            session.NextServer = "lobby";
-            session.OwnerServerId = string.Empty;
-            await _sessionRegistry.UpdateAsync(left.PlayerId, session);
+            if (_roomPlayers.TryGetValue(left.RoomId, out var players))
+            {
+                players.Remove(left.PlayerId);
+                if (players.Count == 0)
+                {
+                    _roomPlayers.Remove(left.RoomId);
+                }
+            }
+
+            gameType = _roomGameType.TryGetValue(left.RoomId, out var gt)
+                ? gt
+                : GameServer.Common.GameType.Unspecified;
         }
+
+        if (!GetAllowReconnect(gameType))
+        {
+            // 재접 불가능한 방 - 소유권을 즉시 놓는다. 클라가 아무 로비에나 재접속하면
+            // EnterLobby가 소유자 없음을 보고 그냥 승인한다.
+            var session = await _sessionRegistry.GetAsync(left.PlayerId);
+            if (session != null)
+            {
+                session.Status = PlayerStatus.Moving;
+                session.CurrentServer = string.Empty;
+                session.NextServer = "lobby";
+                session.OwnerServerId = string.Empty;
+                await _sessionRegistry.UpdateAsync(left.PlayerId, session);
+            }
+            return;
+        }
+
+        // 재접 가능한 방 - 소유권은 그대로 이 게임 에이전트가 들고 있는다 (session은 안 건드림).
+        // 클라가 재접속하면 EnterLobby가 "이 게임 에이전트로 가라"고 리다이렉트해준다.
+        // 유예 시간 안에 재접속을 확인 못 하면(HandlePlayerJoinedAsync로 다시 안 들어오면)
+        // 그때 세션을 완전히 삭제한다 (재접속 정책 - "게임 중 재접속 유예 시간 실패" 결정 반영).
+        _logger.LogInformation("재접 가능한 방 - 유예 시간({Grace}) 시작: {PlayerId} (RoomId={RoomId})",
+            ReconnectGracePeriod, left.PlayerId, left.RoomId);
+
+        var playerId = left.PlayerId;
+        var roomId = left.RoomId;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(ReconnectGracePeriod);
+
+                bool reconnected;
+                lock (_roomPlayersLock)
+                {
+                    reconnected = _roomPlayers.TryGetValue(roomId, out var players) && players.Contains(playerId);
+                }
+
+                if (reconnected)
+                {
+                    _logger.LogInformation("재접속 확인됨 - 세션 유지: {PlayerId}", playerId);
+                    return;
+                }
+
+                _logger.LogWarning("재접속 유예 시간 초과 - 세션 삭제: {PlayerId} (RoomId={RoomId})",
+                    playerId, roomId);
+                await _sessionRegistry.RemoveAsync(playerId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "재접속 유예 타이머 처리 실패: {PlayerId}", playerId);
+            }
+        });
     }
 
     private static GameAgentMessage MakeHeartbeat() => new()

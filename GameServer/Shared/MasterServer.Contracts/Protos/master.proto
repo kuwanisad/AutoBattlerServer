@@ -8,7 +8,6 @@ package masterserver;
 
 service MasterControl {
   rpc Connect(stream MainServerMessage) returns (stream MasterMessage);
-  rpc RequestIngameAssignment(IngameAssignmentRequest) returns (IngameAssignmentResponse);
 }
 
 // ServerType은 common.proto에서 임포트한다.
@@ -40,6 +39,7 @@ message MasterMessage {
     MasterCommand command = 2;
     MatchingServerInfo matching_server = 3;  // 마스터가 메인 서버에 매칭 서버 주소 전달
     SessionRegistryInfo session_registry = 4;  // 마스터가 메인 서버에 세션 레지스트리(Redis) 주소 전달
+    AccountServerInfo account_server = 5;  // 마스터가 메인 서버에 계정 서버 주소 전달
   }
 }
 
@@ -52,6 +52,19 @@ message MatchingServerInfo {
 
 // 마스터 서버가 메인 서버들에게 세션 레지스트리(Redis) 주소를 알린다.
 message SessionRegistryInfo {
+  string address = 1;
+}
+
+// 마스터 서버가 메인 서버들에게 계정 서버(AccountServer) 주소를 알린다.
+// 실제로는 로그인 서버만 이 주소를 쓰지만, 매칭 서버 주소와 같은 방식으로 전체 메인
+// 서버에 동일하게 브로드캐스트한다(지금 구조와 일관성 유지 - 안 쓰는 서버는 그냥 무시).
+//
+// 필드를 이렇게 서버 타입별로 명시적으로 두는 이유: 하나의 범용 딕셔너리/맵 구조로
+// 통합하면 편하지만, 그러면 "이 서버 주소를 빠뜨려도 컴파일이 통과하는" 문제가 생긴다.
+// 지금처럼 각 인프라마다 전용 필드를 두면, 새 인프라가 필요한 서버는 그 필드가
+// 채워지는지를 코드 리뷰/컴파일 단계에서 놓치기 어려워진다 - 필수 주소 빠뜨림을
+// 스키마 차원에서 방지하기 위한 의도적 선택.
+message AccountServerInfo {
   string address = 1;
 }
 
@@ -69,14 +82,4 @@ message BroadcastRelay {
 
 message DrainSignal {
   bool stop_accepting_new = 1;
-}
-
-message IngameAssignmentRequest {
-  string requesting_lobby_instance_id = 1;
-  int32 party_size = 2;
-}
-
-message IngameAssignmentResponse {
-  string ingame_instance_id = 1;
-  string address = 2;
 }

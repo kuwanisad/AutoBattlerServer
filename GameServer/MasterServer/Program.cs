@@ -1,6 +1,6 @@
 using MasterServer;
+using MasterServer.Debug;
 using MasterServer.Registry;
-using MasterServer.Routing;
 using MasterServer.Security;
 using MasterServer.Services;
 using Shared.Common.Redis;
@@ -28,7 +28,6 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.AddGrpc();
 builder.Services.AddSingleton<InstanceRegistry>();
-builder.Services.AddSingleton<IRoutingStrategy, LeastLoadRoutingStrategy>();
 builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisOptions.SectionName));
 
 // TODO: mTLS 도입 시 CompositeServerAuthenticator(+ 개별 검증기)로 교체

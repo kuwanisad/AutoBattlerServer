@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "common.proto";
+
 option csharp_namespace = "IngameServer";
 
 // 게임 서버(Unity NGO)와 게임 에이전트(.NET 8) 간 양방향 스트림.
@@ -28,6 +30,7 @@ message GameServerMessage {
     PlayerJoined player_joined = 6;                 // 플레이어 접속
     PlayerLeft player_left = 7;                     // 플레이어 퇴장
     ApprovalRequest approval_request = 8;           // ConnectionApproval 검증 요청
+    RoomTimeout room_timeout = 9;                   // 방-채움 타임아웃 - 자체 감지한 결원 보고
   }
 }
 
@@ -45,6 +48,9 @@ message GameServerStatus {
 message ServerReady {
   int32 capacity = 1;       // 수용 가능한 최대 매치 수
   int64 timestamp_unix_ms = 2;
+  string client_address = 3;  // 클라이언트가 NGO로 접속할 주소(host:port) - 게임 에이전트
+                               // 자신의 gRPC 주소(SelfAddress)와는 다르다. 매칭 서버가
+                               // 로비/클라에 돌려줄 인게임 서버 주소는 이 값이어야 한다.
 }
 
 // 게임 에이전트의 OpenRoom 요청에 대한 확인 응답.
@@ -98,6 +104,7 @@ message GameAgentMessage {
     OpenRoom open_room = 2;            // 방 열기 요청
     DrainSignal drain = 3;             // 마스터의 드레인 신호 릴레이
     ApprovalResponse approval_response = 4;  // ConnectionApproval 검증 응답
+    CloseRoom close_room = 5;          // 방 취소/제거 요청
   }
 }
 
@@ -111,6 +118,7 @@ message OpenRoom {
   string room_id = 1;             // 마스터가 배정한 방 ID
   repeated string player_ids = 2; // 입장할 플레이어 목록
   int64 timestamp_unix_ms = 3;
+  GameType game_type = 4;         // 인게임 서버가 이 값으로 방 종류(Room 파생 클래스)를 결정한다
 }
 
 // 마스터의 드레인 신호를 게임 서버에 릴레이한다.
@@ -126,4 +134,27 @@ message ApprovalResponse {
   string player_id = 2;     // 검증된 플레이어 ID
   bool approved = 3;        // 승인 여부
   string reason = 4;        // approved = false인 경우 거부 사유
+}
+
+// 매칭 서버가 이미 요청했던 방을 취소했을 때, 게임 에이전트가 게임 서버에 전달한다.
+// 게임 서버(RoomManager)는 방을 제거하고, 이미 NGO로 접속해있던 클라가 있으면
+// redirects에 있는 대로 리다이렉트 정보를 실어 끊는다 - redirects에 없는 클라(리다이렉트할
+// 곳을 못 찾은 경우)는 그냥 끊는다.
+message CloseRoom {
+  string room_id = 1;
+  string reason = 2;
+  repeated PlayerRedirect redirects = 3;
+}
+
+// 리다이렉트 대상 플레이어와 그 목적지 로비 주소.
+message PlayerRedirect {
+  string player_id = 1;
+  string lobby_address = 2;
+}
+
+// 인게임 서버가 방을 열었는데 일정 시간 안에 ExpectedPlayerIds 전원이 접속하지 않으면
+// (게임 서버 자체 타임아웃) 게임 에이전트에 이걸 보고한다. 게임 에이전트는 CancelRoomAsync와
+// 동일한 처리(로비 주소 조회 → 세션 이전 → CloseRoom)를 그대로 재사용한다.
+message RoomTimeout {
+  string room_id = 1;
 }

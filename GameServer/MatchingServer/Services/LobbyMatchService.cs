@@ -1,4 +1,4 @@
-﻿using Grpc.Core;
+using Grpc.Core;
 using MatchingServer;
 using MatchingServer.Services;
 
@@ -26,7 +26,8 @@ public sealed class LobbyMatchService : LobbyMatchControl.LobbyMatchControlBase
         var success = _matchEngine.JoinMatch(
             request.PlayerId,
             request.LobbyServerId,
-            request.SkillScore);
+            request.SkillScore,
+            request.GameType);
 
         return Task.FromResult(new JoinMatchResponse { Success = success });
     }

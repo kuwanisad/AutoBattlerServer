@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Shared.Common.Redis;
 
@@ -12,7 +12,7 @@ namespace Shared.Common.Redis;
 ///
 /// MasterConnectionService는 ISessionRegistryConnector만 주입받아서 ConnectAsync를 호출한다.
 /// </summary>
-public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistryConnector, IDisposable
+public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistryConnector, IRateLimiter, IDisposable
 {
     private readonly ISessionSerializer _serializer;
     private readonly ILoggerFactory _loggerFactory;
@@ -135,6 +135,14 @@ public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistr
     {
         var registry = await GetRegistryAsync();
         return await registry.TryClaimOwnershipWithPreviousOwnerAsync(serverId, playerId, newSession);
+    }
+
+    // === IRateLimiter - 이미 있는 지연 연결을 그대로 재사용한다 (별도 연결 관리 불필요) ===
+
+    public async Task<bool> TryAcquireAsync(string key, TimeSpan window)
+    {
+        var registry = await GetRegistryAsync();
+        return await registry.TryAcquireAsync(key, window);
     }
 
     public void Dispose()

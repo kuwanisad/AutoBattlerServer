@@ -114,8 +114,27 @@ public sealed class PlayerSession
     /// 이 플레이어의 관리 권한을 보유한 서버 ID.
     /// 로그인 시 로비 서버가 설정하고, 인게임 접속 시 게임 에이전트로 이전된다.
     /// TryClaimOwnershipAsync 계열로 원자적으로 변경된다.
+    /// 이 서버만 아래 토큰을 갱신할 권한을 갖는다(1번 결정).
     /// </summary>
     public string OwnerServerId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 현재 유효한 토큰. 서버 이동 시 클라가 이 값을 제출하면 통과한다.
+    /// </summary>
+    public string CurrentToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 바로 직전 토큰. 서버 이동 도중 토큰이 막 갱신된 그 찰나에 클라가 아직 옛 토큰을
+    /// 들고 있을 수 있어서(경합), 한 세대 여유를 둔다. 클라가 이 값을 제출하면 통과시키고
+    /// 새 토큰을 다시 발급한다(1번 결정).
+    /// </summary>
+    public string PreviousToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// CurrentToken이 발급된 시각 (Unix ms). TTL 판단에 사용 - 실제 만료 체크 로직은
+    /// 아직 미구현(TODO, 재접속 정책과 함께 처리 예정).
+    /// </summary>
+    public long TokenIssuedAtUnixMs { get; set; }
 
     /// <summary>마지막 업데이트 시각 (Unix ms).</summary>
     public long UpdatedAtUnixMs { get; set; }

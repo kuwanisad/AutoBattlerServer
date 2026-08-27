@@ -20,8 +20,12 @@ namespace LobbyServer.Services;
 /// </summary>
 public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 {
+    // EnterLobby 남용 방지 쿨다운. 세션 반영 시간이랑 맞출 필요 없음 - 그냥 짧은 값.
+    private static readonly TimeSpan EnterLobbyRateLimitWindow = TimeSpan.FromMilliseconds(300);
+
     private readonly ITokenProvider _tokenProvider;
     private readonly ISessionRegistry _sessionRegistry;
+    private readonly IRateLimiter _rateLimiter;
     private readonly MasterConnectionService _masterConnection;
     private readonly MatchNotificationDispatcher _notificationDispatcher;
     private readonly ILogger<LobbyControlService> _logger;
@@ -29,65 +33,17 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     public LobbyControlService(
         ITokenProvider tokenProvider,
         ISessionRegistry sessionRegistry,
+        IRateLimiter rateLimiter,
         MasterConnectionService masterConnection,
         MatchNotificationDispatcher notificationDispatcher,
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
         _sessionRegistry = sessionRegistry;
+        _rateLimiter = rateLimiter;
         _masterConnection = masterConnection;
         _notificationDispatcher = notificationDispatcher;
         _logger = logger;
-    }
-
-    public override async Task<LoginResponse> Login(LoginRequest request, ServerCallContext context)
-    {
-        _logger.LogInformation("로그인 요청: {PlayerId}", request.PlayerId);
-
-        if (string.IsNullOrEmpty(request.PlayerId))
-        {
-            return new LoginResponse
-            {
-                Success = false,
-                ErrorMessage = "플레이어 ID를 입력하세요.",
-            };
-        }
-
-        // 순수 인증만 담당한다 - 세션/소유권 관련 처리는 EnterLobby에서 한다.
-        var token = _tokenProvider.GenerateToken(request.PlayerId);
-
-        _logger.LogInformation("로그인 성공: {PlayerId}", request.PlayerId);
-
-        return new LoginResponse
-        {
-            Success = true,
-            Token = token,
-        };
-    }
-
-    public override async Task<CreateAccountResponse> CreateAccount(CreateAccountRequest request, ServerCallContext context)
-    {
-        _logger.LogInformation("계정 생성 요청: {PlayerId} / {Nickname}", request.PlayerId, request.Nickname);
-
-        if (string.IsNullOrEmpty(request.PlayerId) || string.IsNullOrEmpty(request.Nickname))
-        {
-            return new CreateAccountResponse
-            {
-                Success = false,
-                ErrorMessage = "플레이어 ID와 닉네임을 입력하세요.",
-            };
-        }
-
-        // Login과 마찬가지로 순수 인증만 담당한다.
-        var token = _tokenProvider.GenerateToken(request.PlayerId);
-
-        _logger.LogInformation("계정 생성 성공: {PlayerId}", request.PlayerId);
-
-        return new CreateAccountResponse
-        {
-            Success = true,
-            Token = token,
-        };
     }
 
     public override async Task<LogoutResponse> Logout(LogoutRequest request, ServerCallContext context)
@@ -102,9 +58,18 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     }
 
     /// <summary>
-    /// 로그인 직후 클라가 호출한다. 이 로비가 플레이어 관리 권한을 가져올 수 있는지 확인하고,
-    /// 못 가져오면(다른 서버가 아직 살아서 소유 중이면) 그 서버 주소를 돌려준다.
-    /// 클라는 이걸로 "진행 중인 게임이 있습니다" 안내를 띄울 수 있다.
+    /// 클라가 접속 직후(또는 다른 서버에서 넘어온 직후) 호출한다. 이 로비가 플레이어
+    /// 관리 권한을 가져올 수 있는지 확인하고, 못 가져오면(다른 서버가 아직 살아서
+    /// 소유 중이면) 그 서버 주소를 돌려준다. 성공하면 새 토큰을 발급해서 돌려준다 -
+    /// 클라가 다음 서버 이동 때 EnterLobby를 다시 부를 때 이 토큰을 쓴다.
+    ///
+    /// 3번 결정: Login/CreateAccount가 코드에서 빠졌으므로, 여기가 사실상 "신원 확인 후
+    /// 토큰을 발급하는" 유일한 지점이 됐다. 지금은 DummyTokenProvider가 뭐가 와도
+    /// 통과시키므로 실질적인 신원 검증은 없는 임시 상태 - 로그인 서버가 생기기 전까지.
+    /// 토큰 회전(1번 결정): 세션 레지스트리에 CurrentToken/PreviousToken 2슬롯을 두고,
+    /// 성공할 때마다 CurrentToken을 PreviousToken으로 밀어내고 새로 발급한다. 실제 제출된
+    /// 토큰이 유효한지 여기서 대조/거부하는 로직은 아직 없다(TODO - 재접속 정책과 함께
+    /// ConnectionApproval 쪽과 짝을 맞춰 나중에 구현).
     /// </summary>
     public override async Task<EnterLobbyResponse> EnterLobby(EnterLobbyRequest request, ServerCallContext context)
     {
@@ -114,10 +79,24 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             return new EnterLobbyResponse { Success = false, ErrorMessage = "인증 정보 없음" };
         }
 
+        // 남용 방지 - 이 시간 안에 실제 세션 정리가 끝나는지와는 무관하다(별개 관심사).
+        // 그냥 짧은 쿨다운으로 같은 플레이어의 과도한 반복 호출만 막는다.
+        var allowed = await _rateLimiter.TryAcquireAsync($"ratelimit:enterlobby:{playerId}", EnterLobbyRateLimitWindow);
+        if (!allowed)
+        {
+            return new EnterLobbyResponse { Success = false, RateLimited = true };
+        }
+
+        var existing = await _sessionRegistry.GetAsync(playerId);
+        var newToken = _tokenProvider.GenerateToken(playerId);
+
         var newSession = new PlayerSession
         {
             Status = PlayerStatus.Lobby,
             CurrentServer = context.Host,
+            CurrentToken = newToken,
+            PreviousToken = existing?.CurrentToken ?? string.Empty,
+            TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp(),
         };
 
         var result = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
@@ -126,7 +105,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         if (result.Claimed)
         {
             _logger.LogInformation("로비 입장: {PlayerId}", playerId);
-            return new EnterLobbyResponse { Success = true };
+            return new EnterLobbyResponse { Success = true, Token = newToken };
         }
 
         _logger.LogInformation("로비 입장 거부 - 다른 서버가 아직 소유 중: {PlayerId} @ {Address}",
@@ -175,6 +154,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
                 PlayerId = playerId,
                 LobbyServerId = _masterConnection.InstanceId,
                 SkillScore = 0, // TODO: 실력 점수 연동
+                GameType = request.GameType,
             });
         }
         else

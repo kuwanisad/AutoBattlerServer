@@ -23,7 +23,6 @@ public sealed class InstanceRegistry
                 existing.Address = info.Address;
                 existing.CurrentLoad = info.CurrentLoad;
                 existing.Capacity = info.Capacity;
-                existing.LastHeartbeatUtc = DateTime.UtcNow;
                 existing.ConnectionToken = info.ConnectionToken;
                 return existing;
             });
@@ -46,21 +45,6 @@ public sealed class InstanceRegistry
 
     public IReadOnlyCollection<InstanceInfo> GetByType(ServerType type) =>
         _instances.Values.Where(i => i.ServerType == type).ToList();
-
-    /// <summary>
-    /// 라우팅 후보를 고를 때 쓰는 조회. 정리(RemoveIfCurrent)가 아직 안 됐더라도,
-    /// 마지막 하트비트가 maxAge보다 오래된 항목은 "죽었을 가능성이 높은" 것으로 보고
-    /// 미리 후보에서 제외한다. 서버 과부하로 정리가 지연되는 동안 죽은 인스턴스로
-    /// 새 매치를 라우팅하는 사고를 줄여준다 (완전히 막아주진 않는다 — 등록 자체가
-    /// 지연된 경우는 이 필터로도 해결되지 않는다).
-    /// </summary>
-    public IReadOnlyCollection<InstanceInfo> GetFreshByType(ServerType type, TimeSpan maxAge)
-    {
-        var threshold = DateTime.UtcNow - maxAge;
-        return _instances.Values
-            .Where(i => i.ServerType == type && i.LastHeartbeatUtc >= threshold)
-            .ToList();
-    }
 
     public IReadOnlyCollection<InstanceInfo> GetAll() => _instances.Values.ToList();
 

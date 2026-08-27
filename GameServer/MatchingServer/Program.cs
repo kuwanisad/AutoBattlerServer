@@ -47,7 +47,7 @@ var app = builder.Build();
 
 app.MapGrpcService<MatchConnectionService>();
 app.MapGrpcService<LobbyMatchService>();
-app.MapGrpcService<IngameMatchService>();
+app.MapGrpcService<InGameRelayService>();
 app.MapGet("/", () => "Matching Server.");
 
 app.Lifetime.ApplicationStarted.Register(() =>

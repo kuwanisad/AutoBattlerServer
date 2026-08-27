@@ -1,19 +1,31 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
-    <PackageReference Include="Google.Protobuf" Version="3.27.0" />
-    <PackageReference Include="Grpc.Core.Api" Version="2.63.0" />
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
+		<PackageReference Include="Google.Protobuf" Version="3.27.0" />
+		<PackageReference Include="Grpc.Core.Api" Version="2.63.0" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <Protobuf Include="Protos\common.proto" GrpcServices="None" />
-  </ItemGroup>
+	<ItemGroup>
+		<Protobuf Include="Protos\common.proto" GrpcServices="None" />
+	</ItemGroup>
+
+	<!-- lobby.proto/ingame.proto 둘 다 이제 common.proto를 import하므로(GameType 등),
+       Unity 쪽에도 이 프로젝트의 생성 결과가 필요하다.
+       주의: Unity가 Client/Server를 .asmdef로 분리하지 않고 있어서(Assets 아래가 전부
+       하나의 어셈블리로 컴파일됨), 두 폴더 모두에 복사하면 같은 타입이 두 번 정의되는
+       충돌이 난다. 그래서 한쪽(Server/Generated)에만 복사한다 - namespace는 폴더 위치와
+       무관하게 GameServer.Common이라 Client 쪽 코드(Lobby.cs 등)에서도 그냥 참조된다. -->
+	<Target Name="CopyGeneratedToUnity" AfterTargets="Build">
+		<Copy
+		  SourceFiles="$(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\Common.cs"
+		  DestinationFolder="$(UnityServerGeneratedPath)" />
+	</Target>
 
 </Project>

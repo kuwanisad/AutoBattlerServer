@@ -19,6 +19,7 @@ public static class SharedCommonExtensions
         services.AddSingleton<SessionRegistryConnector>();
         services.AddSingleton<ISessionRegistry>(sp => sp.GetRequiredService<SessionRegistryConnector>());
         services.AddSingleton<ISessionRegistryConnector>(sp => sp.GetRequiredService<SessionRegistryConnector>());
+        services.AddSingleton<IRateLimiter>(sp => sp.GetRequiredService<SessionRegistryConnector>());
         return services;
     }
 }

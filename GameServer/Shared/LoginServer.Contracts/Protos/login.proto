@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+option csharp_namespace = "LoginServer";
+
+// 클라이언트 최초 접속 전용 서버. 로그인 성공 후 손을 떼면 클라는 다시 이 서버로
+// 돌아오지 않는다 - JWT/재접속 개념 자체가 없다. 연결이 끊기면(어느 단계에서든) 그냥
+// 끊긴 걸로 끝, 복구/재시도 로직 없음.
+//
+// 스트림을 쓰는 이유: "일정 시간 안에 계정 정보를 제출 안 하면 연결을 끊는다"를
+// 구현하려면 서버가 "접속은 됐지만 아직 제출 전"이라는 상태를 들고 있어야 하는데,
+// 단항 RPC로는 그 상태 자체가 없다(호출 안 하면 그냥 아무 일도 안 일어남).
+// MasterControl.Connect와 같은 패턴.
+//
+// 메시지는 최대한 작게 유지한다 - 계정 정보가 반려당하는 경우가 잦은 절차라서다.
+service LoginControl {
+  rpc Connect(stream ClientToLoginMessage) returns (stream LoginToClientMessage);
+}
+
+message ClientToLoginMessage {
+  oneof payload {
+    Credentials credentials = 1;
+  }
+}
+
+message Credentials {
+  string account_id = 1;
+  string password = 2;
+}
+
+message LoginToClientMessage {
+  oneof payload {
+    LoginRedirect redirect = 1;   // 성공 - 이 로비 주소로 이동하라
+    LoginRejected rejected = 2;   // 실패 - 사유 포함, 이후 스트림 종료
+  }
+}
+
+message LoginRedirect {
+  string lobby_address = 1;
+  string player_id = 2;  // 클라가 이후 로비에서 EnterLobby를 부를 때 필요 (지금 토큰
+                          // 스킴에서는 토큰 = playerId라 이 값을 그대로 토큰으로 쓰면 됨)
+}
+
+// reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치, 생성도 실패),
+// "SESSION_CONFLICT"(이미 다른 서버가 이 플레이어를 살아서 소유 중),
+// "NO_LOBBY_AVAILABLE"(매칭 서버가 갈 수 있는 로비를 못 찾음 - "서버가 가득 찼습니다"),
+// "TIMEOUT"(제한 시간 안에 계정 정보 미제출), "INTERNAL_ERROR"(그 외 내부 오류)
+message LoginRejected {
+  string reason = 1;
+}

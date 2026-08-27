@@ -16,6 +16,10 @@
 		<None Include="..\Shared\shared.appsettings.json" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <Folder Include="Routing\" />
+	</ItemGroup>
+
 	<Target Name="CheckSharedConfig" BeforeTargets="Build">
 		<Error Condition="!Exists('..\Shared\shared.appsettings.json')" Text="shared.appsettings.json 파일이 없습니다. GameServer/Shared/ 폴더를 확인하세요." />
 	</Target>

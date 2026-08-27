@@ -24,6 +24,9 @@ public sealed class MasterConnectionService : BackgroundService
     /// <summary>마스터 서버로부터 받은 매칭 서버 주소.</summary>
     public string MatchingServerAddress { get; private set; } = string.Empty;
 
+    /// <summary>마스터 서버로부터 받은 계정 서버(AccountServer) 주소. 실제로는 로그인 서버만 씀.</summary>
+    public string AccountServerAddress { get; private set; } = string.Empty;
+
     /// <summary>이 서버 인스턴스의 고유 ID.</summary>
     public string InstanceId => _options.InstanceId;
 
@@ -257,6 +260,14 @@ public sealed class MasterConnectionService : BackgroundService
                         // 로비/게임 에이전트/채팅/매칭 서버 전부 세션 레지스트리(Redis)가 필요하므로
                         // 서버 타입 구분 없이 받는 즉시 연결을 요청한다.
                         _ = ConnectSessionRegistryAsync(message.SessionRegistry.Address, stoppingToken);
+                        break;
+
+                    case MasterMessage.PayloadOneofCase.AccountServer:
+                        // 실제로는 로그인 서버만 이 주소를 쓰지만, 매칭 서버 주소와 같은
+                        // 방식으로 전체 메인 서버에 동일하게 브로드캐스트한다 - 지금 구조와
+                        // 일관성 유지, 안 쓰는 서버는 그냥 무시.
+                        AccountServerAddress = message.AccountServer.Address;
+                        _logger.LogInformation("계정 서버 주소 수신: {Address}", AccountServerAddress);
                         break;
 
                     default:

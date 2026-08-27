@@ -12,7 +12,7 @@ namespace Shared.Common.Redis;
 /// 이 클래스는 순수하게 "이미 알고 있는 주소로 연결해서 CRUD를 수행"하는 역할만 한다.
 /// 주소를 언제 어떻게 알아내는지(마스터로부터 수신 등)는 SessionRegistryConnector가 담당한다.
 /// </summary>
-public sealed class RedisSessionRegistry : ISessionRegistry, IDisposable
+public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisposable
 {
     private readonly IConnectionMultiplexer _redis;
     private readonly IDatabase _db;
@@ -209,6 +209,14 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IDisposable
         }
 
         return new ClaimResult(false, previousOwner);
+    }
+
+    // === 레이트 리밋 (IRateLimiter) ===
+
+    public async Task<bool> TryAcquireAsync(string key, TimeSpan window)
+    {
+        // SET key 1 PX <window_ms> NX - NX(없을 때만 성공)라서 이 호출 자체가 원자적 판단이다.
+        return await _db.StringSetAsync(key, "1", window, When.NotExists);
     }
 
     public void Dispose()

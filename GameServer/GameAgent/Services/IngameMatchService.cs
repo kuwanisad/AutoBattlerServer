@@ -65,12 +65,12 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
 
         // 수락 후, 실제 방 생성(게임 서버와의 비동기 왕복)은 백그라운드로 진행하고
         // 결과는 끝나는 대로 PrepareMatchResult로 따로 보고한다.
-        _ = ProcessOpenRoomAsync(request.MatchId, request.PlayerIds.ToList());
+        _ = ProcessOpenRoomAsync(request.MatchId, request.PlayerIds.ToList(), request.GameType);
 
         return Task.FromResult(new PrepareMatchResponse { Accepted = true });
     }
 
-    private async Task ProcessOpenRoomAsync(string matchId, List<string> playerIds)
+    private async Task ProcessOpenRoomAsync(string matchId, List<string> playerIds, GameServer.Common.GameType gameType)
     {
         bool success;
         string errorMessage = string.Empty;
@@ -78,7 +78,7 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
         try
         {
             var roomOpened = await _handler.RequestOpenRoomAsync(
-                matchId, playerIds, OpenRoomTimeout, CancellationToken.None);
+                matchId, playerIds, gameType, OpenRoomTimeout, CancellationToken.None);
 
             success = roomOpened.Success;
             errorMessage = roomOpened.ErrorMessage;
@@ -116,6 +116,7 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
                 MatchId = matchId,
                 Success = success,
                 ErrorMessage = errorMessage ?? string.Empty,
+                IngameAddress = _handler.ClientAddress,
             });
 
             _logger.LogInformation("PrepareMatch 결과 통보: {MatchId} success={Success}", matchId, success);
@@ -131,5 +132,22 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
     {
         throw new RpcException(new Status(StatusCode.Unimplemented,
             "게임 에이전트는 이 RPC를 호출하지 않습니다."));
+    }
+
+    public override async Task<CancelRoomResponse> CancelRoom(
+        CancelRoomRequest request, ServerCallContext context)
+    {
+        _logger.LogInformation("CancelRoom 요청 수신: {MatchId} ({Reason})", request.MatchId, request.Reason);
+
+        await _handler.CloseRoomAndRedirectAsync(request.MatchId, request.Reason);
+
+        return new CancelRoomResponse { Acknowledged = true };
+    }
+
+    public override Task<RequestLobbyAddressResponse> RequestLobbyAddress(
+        RequestLobbyAddressRequest request, ServerCallContext context)
+    {
+        throw new RpcException(new Status(StatusCode.Unimplemented,
+            "게임 에이전트는 이 RPC를 호출하지 않습니다 (매칭 서버에 이 RPC를 호출하는 쪽입니다)."));
     }
 }

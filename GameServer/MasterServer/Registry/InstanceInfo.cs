@@ -11,7 +11,6 @@ public sealed class InstanceInfo
     public required string Address { get; set; }
     public int CurrentLoad { get; set; }
     public int Capacity { get; set; }
-    public DateTime LastHeartbeatUtc { get; set; } = DateTime.UtcNow;
 
     /// <summary>
     /// 이 인스턴스로 내려보낼 메시지(하트비트, 명령)의 송신 큐.

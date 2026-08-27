@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
+    <PackageReference Include="Google.Protobuf" Version="3.27.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos\login.proto" GrpcServices="Both" />
+  </ItemGroup>
+
+  <Target Name="CopyGeneratedToUnity" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\Login.cs;
+                   $(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\LoginGrpc.cs"
+      DestinationFolder="$(UnityClientGeneratedPath)" />
+  </Target>
+
+</Project>

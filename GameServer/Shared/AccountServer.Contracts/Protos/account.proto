@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+option csharp_namespace = "AccountServer";
+
+// 로그인 서버 → 계정 서버 계약. 단항 RPC만 있다 - 계정 서버는 매칭 서버처럼 서버 풀을
+// 관리하는 게 아니라 순수 조회/생성 저장소라서 접속 유지 스트림이 필요 없다.
+//
+// 메시지는 최대한 작게 유지한다 - 계정 검증/생성은 반려가 잦은 절차라, 필드마다
+// 실패할 때마다 다시 왕복하는 비용을 최소화하기 위함.
+service AccountControl {
+  rpc VerifyAccount(VerifyAccountRequest) returns (VerifyAccountResponse);
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+}
+
+message VerifyAccountRequest {
+  string account_id = 1;
+  string password = 2;
+}
+
+message VerifyAccountResponse {
+  bool found = 1;        // 계정이 존재하고 비밀번호가 일치하는지
+  string player_id = 2;  // found = true일 때만 유효
+}
+
+message CreateAccountRequest {
+  string account_id = 1;
+  string password = 2;
+}
+
+message CreateAccountResponse {
+  bool success = 1;
+  string player_id = 2;      // 새로 발급된 playerId (GUID)
+  string error_message = 3;  // 실패 시(예: 이미 존재하는 계정 ID)
+}

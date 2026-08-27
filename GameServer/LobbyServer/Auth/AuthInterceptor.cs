@@ -6,20 +6,14 @@ namespace LobbyServer.Auth;
 
 /// <summary>
 /// 모든 gRPC 요청에서 JWT 토큰을 자동으로 검증하는 인터셉터.
-/// Login/CreateAccount는 토큰이 없어도 통과한다.
-/// 나머지 요청은 Authorization 헤더에 "Bearer {token}"이 있어야 한다.
+/// Login/CreateAccount는 코드에서 제거됐다(3번 - 로그인 서버 분리 전까지 임시로 없앰).
+/// 지금은 EnterLobby부터 토큰이 필요하고, 그 토큰 자체는 클라가 처음엔 임의로 만든
+/// 값(사실상 playerId)을 그대로 제출하며, DummyTokenProvider가 검증을 사실상 통과시킨다.
 /// </summary>
 public sealed class AuthInterceptor : Interceptor
 {
     private readonly ITokenProvider _tokenProvider;
     private readonly ILogger<AuthInterceptor> _logger;
-
-    // 토큰 없이 통과하는 메서드 목록
-    private static readonly HashSet<string> PublicMethods =
-    [
-        "/LobbyControl/Login",
-        "/LobbyControl/CreateAccount",
-    ];
 
     public AuthInterceptor(ITokenProvider tokenProvider, ILogger<AuthInterceptor> logger)
     {
@@ -32,9 +26,7 @@ public sealed class AuthInterceptor : Interceptor
         ServerCallContext context,
         UnaryServerMethod<TRequest, TResponse> continuation)
     {
-        if (!PublicMethods.Contains(context.Method))
-            ValidateToken(context);
-
+        ValidateToken(context);
         return await continuation(request, context);
     }
 
@@ -44,9 +36,7 @@ public sealed class AuthInterceptor : Interceptor
         ServerCallContext context,
         ServerStreamingServerMethod<TRequest, TResponse> continuation)
     {
-        if (!PublicMethods.Contains(context.Method))
-            ValidateToken(context);
-
+        ValidateToken(context);
         await continuation(request, responseStream, context);
     }
 

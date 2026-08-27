@@ -1,64 +1,44 @@
 syntax = "proto3";
 
+import "common.proto";
+
 option csharp_namespace = "LobbyServer";
 
 // 클라이언트와 로비 서버 간 gRPC 계약.
 // 현업 패턴에 따라 용도별로 RPC 타입을 분리한다.
-// - 단항 RPC: 요청/응답이 명확한 것 (로그인, 계정 생성 등)
+// - 단항 RPC: 요청/응답이 명확한 것 (계정 생성 등)
 // - 서버 스트리밍: 서버가 지속적으로 상태를 밀어주는 것 (매치메이킹)
 //
-// 인증: Login/CreateAccount/NotifyMatch를 제외한 모든 RPC는 gRPC 메타데이터에
-// "authorization: Bearer {JWT}" 를 포함해야 한다.
+// 인증: 모든 RPC가 gRPC 메타데이터에 "authorization: Bearer {token}"을 포함해야 한다.
 // AuthInterceptor가 자동으로 검증한다.
+//
+// Login/CreateAccount는 코드에서 제거됐다 - 별도 "로그인 서버"로 분리하는 게 맞는
+// 방향이지만 그건 나중 작업이고, 지금은 EnterLobby부터 토큰이 필요한 임시 상태다.
+// 클라는 최초 접속 시 스스로 만든(사실상 playerId 그대로인) 토큰을 제출하고,
+// EnterLobby가 성공하면 그 자리에서 새 토큰을 발급해 돌려준다(EnterLobbyResponse.token).
+// DummyTokenProvider가 지금은 어떤 토큰이든 통과시키므로 사실상 신원 검증은 없는
+// 상태 - 로그인 서버가 생기기 전까지의 임시 조치.
+//
+// 매칭 서버 → 로비 서버 콜백(매칭 확정/취소 통보)은 여기 없다 - 로비가
+// MatchingServer.Contracts의 MatchConnectionControl.Connect 스트림으로 매칭 서버에
+// 접속을 유지하고, 그 스트림으로 MatchNotification을 직접 받는다. 별도 RPC나
+// 주소 조회가 필요 없다 (MatchServerConnection/MatchNotificationDispatcher 참고).
 
 service LobbyControl {
-  // === 인증 (토큰 불필요) ===
-  rpc Login(LoginRequest) returns (LoginResponse);
-  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
-
-  // === 세션 (토큰 필요) ===
+  // === 세션 ===
   rpc Logout(LogoutRequest) returns (LogoutResponse);
 
-  // 로그인 직후 클라가 호출한다. 이 로비가 플레이어 관리 권한을 가져올 수 있는지 확인한다.
-  // 다른 서버(주로 인게임)가 아직 살아있는 채로 권한을 갖고 있으면 거부되고,
-  // 그 서버 주소를 돌려준다 - 클라는 이걸로 "진행 중인 게임이 있습니다" 안내를 띄울 수 있다.
+  // 클라가 접속 직후(또는 다른 서버에서 넘어온 직후) 호출한다. 이 로비가 플레이어 관리
+  // 권한을 가져올 수 있는지 확인한다. 다른 서버(주로 인게임)가 아직 살아있는 채로 권한을
+  // 갖고 있으면 거부되고, 그 서버 주소를 돌려준다 - 클라는 이걸로 "진행 중인 게임이
+  // 있습니다" 안내를 띄울 수 있다. 성공하면 새 토큰을 발급해서 함께 돌려준다.
   rpc EnterLobby(EnterLobbyRequest) returns (EnterLobbyResponse);
 
-  // === 매치메이킹 (토큰 필요) ===
+  // === 매치메이킹 ===
   // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
   // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
   rpc RequestMatch(MatchRequest) returns (stream MatchEvent);
   rpc CancelMatch(CancelMatchRequest) returns (CancelMatchResponse);
-
-  // === 매칭 서버 → 로비 서버 콜백 (토큰 불필요, 내부 서버 간 통신) ===
-  // 매칭 서버가 매칭 결과를 로비 서버에 직접 통보한다.
-  // 로비 서버는 이 결과를 해당 플레이어의 RequestMatch 스트림으로 전달한다.
-  rpc NotifyMatch(MatchNotification) returns (MatchNotificationResponse);
-}
-
-// === 인증 ===
-
-message LoginRequest {
-  string player_id = 1;
-  string password = 2;
-}
-
-message LoginResponse {
-  bool success = 1;
-  string token = 2;           // JWT 토큰. 이후 모든 요청의 메타데이터에 포함
-  string error_message = 3;
-}
-
-message CreateAccountRequest {
-  string player_id = 1;
-  string password = 2;
-  string nickname = 3;
-}
-
-message CreateAccountResponse {
-  bool success = 1;
-  string token = 2;
-  string error_message = 3;
 }
 
 // === 세션 ===
@@ -78,12 +58,20 @@ message EnterLobbyResponse {
   // success = false이고 이게 true면, 다른 서버가 아직 이 플레이어를 살아서 소유 중이라는 뜻.
   bool has_conflicting_session = 3;
   string conflicting_server_address = 4;  // 클라가 "진행 중인 게임이 있습니다" 안내에 쓸 주소
+
+  // success = false이고 이게 true면, 너무 자주 호출해서 서버가 남용 방지로 거부한 것.
+  // has_conflicting_session이랑은 별개 사유 - 클라는 이 경우 그냥 잠시 후 재시도하면 된다.
+  bool rate_limited = 5;
+
+  // success = true일 때 - 새로 발급된 토큰. 클라는 이후 요청(그리고 다음 서버 이동 시
+  // EnterLobby)에 이 값을 써야 한다.
+  string token = 6;
 }
 
 // === 매치메이킹 ===
 
 message MatchRequest {
-  // 추후 모드, 티어 등 매치 조건 추가 예정
+  GameType game_type = 1;
 }
 
 message MatchEvent {
@@ -120,29 +108,5 @@ message MatchFailed {
 message CancelMatchRequest {}
 
 message CancelMatchResponse {
-  bool success = 1;
-}
-
-// === 매칭 서버 → 로비 서버 콜백 ===
-
-message MatchNotification {
-  oneof result {
-    MatchConfirmedNotice confirmed = 1;
-    MatchCancelledNotice cancelled = 2;
-  }
-}
-
-message MatchConfirmedNotice {
-  string player_id = 1;
-  string ingame_server_id = 2;
-  string ingame_address = 3;
-}
-
-message MatchCancelledNotice {
-  string player_id = 1;
-  string reason = 2;
-}
-
-message MatchNotificationResponse {
   bool success = 1;
 }
