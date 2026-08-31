@@ -390,7 +390,9 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
 
 ## 구현 필요
 
-- 퇴장 후 로비 복귀 검증 테스트
+- [완료] 퇴장 후 로비 복귀 검증 테스트 - 오늘 클라 접속→매치→인게임 이동→게임 종료→
+  로비 복귀(리다이렉트+재접속)까지 실제 로그로 전부 확인함.
+
 - **채팅 서버 - `IChatMessageStore`를 공유 저장소로 교체**
   - 지금 `InMemoryChatMessageStore`는 인스턴스 로컬 `ConcurrentDictionary`라서, 플레이어가
     다른 채팅 서버 인스턴스로 재접속하면 새 인스턴스는 그 채널의 과거 기록을 모른다.
@@ -404,62 +406,31 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     (Kafka/RabbitMQ 프로듀서)도 이 작업이나 모더레이션 파이프라인 설계 시 같이 정리할 것.
     (비속어 필터링 자체는 `IChatFilter`가 담당 - inline 방식이라 이것과는 별개.)
 
-- **매칭 서버 - 배관 전부 완료, 남은 건 알고리즘 + 게임 에이전트 자체 타임아웃**
-  - [완료] `MatchConnectionControl` 스트림으로 로비/게임 에이전트 접속 유지 - 예전
-    `RegisterServer`/`UnregisterServer` 단항 + Redis TTL 폴링을 대체. 연결 끊기면
-    (하트비트 타임아웃 포함) 즉시 서버 풀에서 제거됨.
-  - [완료] `JoinMatch`/`LeaveMatch`(로비→매칭), `PrepareMatch`/`PrepareMatchResult`
-    (매칭↔게임에이전트), `CancelRoom`(매칭→게임에이전트), `RequestLobbyAddress`
-    (게임에이전트→매칭) - 전부 정상 동작.
-  - [완료] 매칭 확정/취소 통보(`MatchNotification`) - 예전엔 `LobbyMatchControl.NotifyMatch`
-    이중 정의 버그로 로비에 아예 안 닿았는데, 이제 위 스트림에 실어 보내는 방식으로 바뀌면서
-    자연스럽게 해결됨. 로비 쪽은 `MatchNotificationDispatcher`가 수신 처리.
-  - [완료] **게임 에이전트가 실제로 게임 서버(Unity)에 방을 생성하고 응답을 기다림.**
-    `GameServerHandler.RequestOpenRoomAsync` + `PendingWorkTracker`로 비동기 왕복 처리.
-  - [완료] Unity 쪽 `GameManager`(정적 클래스, 매니저 총괄) / `RoomManager`(방 여러 개
-    동시 관리, 유저↔방ID 캡슐화) / `IngameServerInstance`(옛 IngameServerBootstrap, 채널
-    허브 역할만) 구조 신설. 연결 끊기면 `GameManager.Shutdown()`이 `ManagerType` 순서대로
-    전부 정리 후 프로세스 종료 (되돌릴 수 없는 절차로 확정).
-  - [완료] **접속 끊김/서버 다운 처리 전체** (매칭 서버 책임 범위인 1~7번 구간).
-    `Shared.Common/Transactions/CompensatingTransaction.cs`(범용 되돌리기 스택, 상속 아닌
-    조합) + `MatchEngine`의 `_matchLock`/`TryClaimMatch`(원자적 선점) + `_matchesByLobby`
-    (역인덱스) + `LeaveMatch`/`HandleServerDisconnected` 진입점으로 구현 완료.
-  - [완료] **클라 리다이렉트** - `CloseRoom`/`PlayerRedirect`(`ingame.proto` 신규)로
-    게임 에이전트가 이미 NGO 접속한 클라에게 새 로비 주소를 실어서 끊음
-    (`NetworkManager.DisconnectClient(clientId, lobbyAddress)`).
-  - [완료] 클래스 개명: `MatchingServer/Services/IngameMatchService.cs` →
-    `InGameRelayService.cs` (게임 에이전트 쪽에도 동명 클래스가 있어서 헷갈렸음).
-  - **[결정] "Crossing 단계"(매칭 서버가 접속 완료를 추적)는 폐기.** 매칭 서버는 7번(로비
-    통보)까지만 책임지고 손을 뗀다 - "방 열었는데 결원 발생"은 게임 에이전트/인게임
-    서버가 자체적으로 처리한다 (아래 항목).
-  - **[미구현] 게임 에이전트의 자체 방-채움 타임아웃** - "방 열린 뒤 일정 시간 대기 →
-    전원 접속 확인 → 결원 있으면 CancelRoom과 같은 경로(로비 주소 요청 + 리다이렉트)를
-    스스로 실행"하는 로직. 지금 구현된 `CancelRoomAsync`는 매칭 서버가 먼저 취소를
-    요청한 경우에만 반응하는 수동적 경로 - 게임 에이전트가 스스로 트리거하는 능동적
-    타임아웃은 아직 없음. `GameServerHandler`가 `PrepareMatch`로 받은 기대 플레이어
-    목록 vs 실제 `PlayerJoined` 수신 현황을 비교하는 타이머 신설 필요.
+- **매칭 서버 - 배관 전부 완료, 남은 건 실력 기반 알고리즘뿐**
+  - [완료] 접속 유지 스트림, 매칭↔게임에이전트 전체 RPC, 매칭 확정/취소 통보, 실제 방
+    생성/대기, 접속 끊김/서버 다운 처리 전체(`CompensatingTransaction`/`_matchLock`),
+    클라 리다이렉트, 클래스 개명(`InGameRelayService`), "Crossing 단계" 폐기 결정,
+    게임 에이전트 자체 방-채움 타임아웃(`RoomTimeout`/`PendingKill`), `EnterLobby` rate
+    limit, 매치 정상 종료→로비 복귀(`CloseRoomAndRedirectAsync`), 더미 인게임 로직
+    (`IGameLogic`/`DummyGameLogic`) - 전부 오늘까지 완료 및 실제 테스트로 검증됨.
   - **[미구현] 실력 점수 기반 매칭 알고리즘** - 지금은 더미(1명이면 즉시 매칭). 후순위로
-    미루기로 함 (아직 게임 자체가 없어서 뭘 기준으로 매칭할지 정할 수 없음).
-- [완료] `ARCHITECTURE.md` 갱신
-- [완료] **`EnterLobby` 남용 방지 rate limit** - `IRateLimiter`(신규, `Shared.Common.Redis`)를
-  `SessionRegistryConnector`가 같은 지연 연결로 프록시. `SET NX PX 300ms`로 원자적 판단.
-  `EnterLobbyResponse.rate_limited` 필드 추가.
-- [완료] **게임 에이전트 자체 방-채움 타임아웃** - Unity `Room.IsStillIncompleteAfterAsync` +
-  `RoomManager.MonitorFillTimeoutAsync`(30초) + `PendingKill` 목록(정리 중인 방 신규 접속
-  거부) + 신규 `RoomTimeout`(인게임→게임에이전트) 메시지. "게임 시작" 트리거는
-  `RegisterConnectedClient`(접속 완료 즉시)에 별도로 둬서 타이머와 완전히 무관하게 함.
-  남는 경합(핸드셰이크 완료~콜백 사이의 찰나)은 `EnterLobby`와 같은 부류의 구조적 한계로
-  받아들이고 완화만 함(리다이렉트로 우아하게 처리됨).
-- [완료] **매치 정상 종료 → 로비 복귀** - `GameServerHandler.HandleMatchResultAsync`가
-  `CancelRoomAsync`(→`CloseRoomAndRedirectAsync`로 개명, 취소/타임아웃/정상종료 셋 다 공용)를
-  호출해서 로비 복귀 처리. 승패/점수/보상 판정은 게임 에이전트가 관여 안 함("에이전트"라는
-  이름 그대로 - 판단은 인게임 서버가 이미 끝내고 결과만 넘김). `result.Players`(순위/승패/
-  획득점수)는 지금 아무 데도 안 쓰임 - Kafka 발행 등 실제 기록/보상 처리는 여전히 미구현.
-- **[진행 중] 더미 인게임 로직** - 클라 접속→매치 시작→인게임 서버 이동→게임 종료→로비
-  복귀 전체를 실제로 테스트하려면, "게임 시작 후 일정 시간 뒤 자동으로 매치 결과를
-  보고하는" 최소한의 더미가 필요함(진짜 게임 로직은 없으므로). `IGameLogic` 인터페이스 +
-  `DummyGameLogic` 구현체로, 기존 `Dummy*` 패턴(`DummyTokenProvider` 등)과 통일.
-  `RoomManager.RegisterConnectedClient`의 "방 전원 접속 완료" TODO 자리에 연결.
+    미루기로 함 (아직 게임 자체가 없어서 뭘 기준으로 매칭할지 정할 수 없음). 이때
+    `JoinMatchRequest`/`WaitingPlayer`에 이미 있는 `game_type`별로 대기열을 나누는
+    필터링도 같이 구현 필요(지금은 안 나뉘고 있음).
+
+- **로그인 서버(`LoginServer`/`AccountServer`) - 배관 완료, 검증 로직만 남음**
+  - [완료] 계정 검증/생성, 세션 레지스트리 권한 획득, 매칭 서버 로비 조회, 소유권 자발적
+    이관, 클라 최초 진입 전체 흐름. Unity `ClientInstance` 연동까지 완료(오늘 실제 빌드/
+    테스트 통과).
+  - **[미구현] 토큰 2슬롯(`CurrentToken`/`PreviousToken`) 실제 대조 검증** - `PlayerSession`에
+    자료구조는 있지만, "제출된 토큰을 세션의 2슬롯과 TTL로 대조해서 거부"하는 로직 자체가
+    없음. 검증 지점은 이동 방향에 따라 다름:
+    - **로비→인게임**: 게임 에이전트의 `ConnectionApproval`이 검증해야 함(서버 간 소통을
+      게임 에이전트가 대신하므로). NGO 접속 payload에 토큰 추가, `ingame.proto`의
+      `ApprovalRequest`에 필드 추가, 게임 에이전트 검증 로직 신설 필요.
+    - **인게임→로비**: 로비의 `EnterLobby`가 검증해야 함. 지금은 무조건 새로 발급만 하고
+      대조는 안 함.
+    - 검증 실패 시 정책(조용히 통과 vs 실제 거부)도 미결.
 
 ---
 
@@ -486,13 +457,30 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     연결이 끊기면 어느 단계에서든 그냥 끊긴 걸로 끝(복구/재시도 로직 없음).
   - 매칭 서버가 갈 수 있는 로비를 못 찾으면 `LoginRejected{reason="NO_LOBBY_AVAILABLE"}`
     로 거부 - "서버가 가득 찼습니다" 케이스.
-  - **[미구현] Unity 클라 쪽 연동** - `ClientInstance`가 아직 `LoginServer`를 안 쓰고
-    예전처럼 스스로 만든 토큰으로 바로 `EnterLobby`를 부르는 상태. 로그인 서버 스트림
-    프로토콜(`Connect`, `Credentials` 제출, `LoginRedirect`/`LoginRejected` 수신)에 맞춰
-    클라 쪽 재작성 필요 - 다음 작업.
+  - [완료] **Unity 클라 쪽 연동** - `ILoginChannel`/`GrpcLoginChannel` 신설, `ClientInstance.Start()`가
+    로그인 서버 경유하도록 재작성 완료. `LoginServer.Contracts.csproj`에 Unity 복사 빌드
+    타겟 누락돼있던 것도 발견해서 추가함.
+  - [완료] **전체 엔드투엔드 테스트 성공** - 클라 로그인(계정 생성) → 로비 주소 수신 →
+    EnterLobby → RequestMatch → 매치 확정 → NGO 인게임 접속 → 게임 진행(더미) → 방 종료
+    지시 → 클라 자진 이탈 → 새 로비 재접속까지 로그로 전부 확인함.
+  - **[해결됨] `HTTP_1_1_REQUIRED` 오류** - `LoginConnectionHandler`가 `AccountServer`/
+    매칭 서버를 단항 RPC로 호출할 때 평문(TLS 없음) HTTP/2에서 이 오류가 재현됐다.
+    `GrpcChannel.ForAddress(address)`(기본 핸들러)만 쓰면 실패하고, `MasterConnectionService`가
+    쓰는 것과 동일하게 `SocketsHttpHandler`를 명시적으로 구성해서 `GrpcChannelOptions.HttpHandler`에
+    넘기면 해결됨 - 정확한 내부 메커니즘은 규명 못 했지만(같은 프로세스 내 다른 단항 호출은
+    기본 핸들러로도 잘 되는 사례가 있어서 원인이 더 미묘함), 재현 가능한 해법은 확보함.
+    **비슷한 오류가 다른 곳에서도 나면 이 패턴(`CreateChannel` 헬퍼, `LoginConnectionHandler.cs`
+    참고)을 우선 적용해볼 것.**
+    (참고: 도중에 Kestrel을 `Http1AndHttp2`로 완화해봤는데 이건 답이 아니었음 - TLS 없는
+    환경에서 `Http1AndHttp2`는 ALPN 협상 채널이 없어서 Kestrel이 그냥 HTTP/1.1로 확정해버림.
+    `Http2` 단독이 h2c로 정확히 동작하는 올바른 설정이었고, 그대로 유지함.)
   - **[확인 필요]** 이번 스캐폴딩(csproj, appsettings.json, `.slnx`)은 이번 세션 스크래치
     공간 리셋으로 정확한 로컬 원본이 없어서, 다른 메인 서버 프로젝트 패턴을 참고해
     재구성함. 로컬의 다른 프로젝트 설정과 다른 부분 없는지 확인 필요.
+  - **포트 배정**: `AccountServer` 5500/5501, `LoginServer` 5400/5401 (`DummySubServer`가
+    이미 5300을 쓰고 있어서 처음 배정했던 5300과 충돌났던 적 있음 - 새 서버 포트 잡을 땐
+    `start-servers.ps1`/기존 서버들 전체와 대조 필수). `start-servers.ps1`/`stop-servers.ps1`에
+    두 서버 추가 완료 (마스터→매칭 다음, DummySubServer 이전 순서).
   - **[미구현]** 실제로 "제출된 토큰을 세션의 2슬롯과 대조"하는 검증 로직 - 여전히
     미구현 상태(이전 항목과 동일). `EnterLobby`/`ConnectionApproval` 양쪽 다.
 

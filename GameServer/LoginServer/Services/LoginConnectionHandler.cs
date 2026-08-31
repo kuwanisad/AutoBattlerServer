@@ -6,6 +6,7 @@ using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Redis;
+using System.Net.Http;
 
 namespace LoginServer.Services;
 
@@ -144,6 +145,30 @@ internal sealed class LoginConnectionHandler
         // 7. 스트림 종료 - 클라는 이 로그인 서버로 다시 안 온다.
     }
 
+    /// <summary>
+    /// MasterConnectionService가 마스터 서버에 접속할 때 쓰는 것과 동일한 SocketsHttpHandler
+    /// 구성으로 채널을 만든다. 원래는 GrpcChannel.ForAddress(address)만 써도 될 것 같았는데,
+    /// AccountServer(TLS 없는 평문 HTTP/2, h2c) 호출에서 "HTTP_1_1_REQUIRED" 오류가 재현됐고
+    /// 이 명시적 핸들러 구성으로 바꾸니 해결됐다 - 정확한 메커니즘은 불명확하지만, 이미
+    /// 검증된 패턴을 그대로 재사용하는 쪽이 안전하다고 판단.
+    /// </summary>
+    private static GrpcChannel CreateChannel(string address)
+    {
+        var handler = new SocketsHttpHandler
+        {
+            EnableMultipleHttp2Connections = true,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(10),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
+            KeepAlivePingPolicy = HttpKeepAlivePingPolicy.WithActiveRequests,
+        };
+
+        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
+        {
+            HttpHandler = handler,
+            DisposeHttpClient = true,
+        });
+    }
+
     /// <summary>계정 서버에 검증을 요청하고, 없으면 같은 정보로 생성까지 시도해서 playerId를 얻는다.</summary>
     private async Task<string?> ResolvePlayerIdAsync(Credentials credentials, CancellationToken cancellationToken)
     {
@@ -155,7 +180,7 @@ internal sealed class LoginConnectionHandler
 
         try
         {
-            using var channel = GrpcChannel.ForAddress(_masterConnection.AccountServerAddress);
+            using var channel = CreateChannel(_masterConnection.AccountServerAddress);
             var client = new AccountControl.AccountControlClient(channel);
 
             var verifyResponse = await client.VerifyAccountAsync(new VerifyAccountRequest
@@ -205,7 +230,7 @@ internal sealed class LoginConnectionHandler
 
         try
         {
-            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+            using var channel = CreateChannel(_masterConnection.MatchingServerAddress);
             var client = new IngameMatchControl.IngameMatchControlClient(channel);
             var response = await client.RequestLobbyAddressAsync(
                 new RequestLobbyAddressRequest(), cancellationToken: cancellationToken);

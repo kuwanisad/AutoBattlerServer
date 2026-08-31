@@ -13,8 +13,8 @@ builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnCha
 
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.ListenAnyIP(5300, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
-    options.ListenAnyIP(5301, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
+    options.ListenAnyIP(5500, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
+    options.ListenAnyIP(5501, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
 });
 
 builder.Services.Configure<MasterConnectionOptions>(
