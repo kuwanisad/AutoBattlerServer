@@ -393,6 +393,38 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
 - [완료] 퇴장 후 로비 복귀 검증 테스트 - 오늘 클라 접속→매치→인게임 이동→게임 종료→
   로비 복귀(리다이렉트+재접속)까지 실제 로그로 전부 확인함.
 
+- **토큰 2슬롯 대조 검증 - [완료] 로비/인게임 양쪽 다**
+  - [완료] 인게임→로비(`EnterLobby`) - 이전 라운드에서 완료.
+  - [완료] 로비→인게임(`ConnectionApproval`) - `ingame.proto`의 `ApprovalRequest`/
+    `ApprovalResponse`에 각각 `token`/`new_token` 필드 추가. NGO 접속 payload를
+    `"{playerId}|{token}"` 형식으로 변경. 게임 에이전트가 `TokenVerification.IsValid`로
+    검증 후, 승인 시 `PreviousToken`/`CurrentToken` 회전까지 수행("갱신 권한은
+    `OwnerServerId`를 가진 서버만" 원칙 유지). 새 토큰은 `ApprovalResponse`(게임 서버↔게임
+    에이전트 간 통신이라 클라가 직접 못 받음) 대신, 이미 만든 `CustomMessagingManager`
+    패턴(`RoomClosed`와 동일)으로 `"TokenUpdate"` 메시지를 신설해서 클라에 별도 전달함.
+  - **[검토 완료, 문제없음으로 결론]** "인게임 서버가 토큰 회전 직후, 결과를 클라에
+    전달하기 전에 죽는" 경합을 검토함 - 회전은 게임 에이전트가 Redis에 이미 원자적으로
+    기록해둔 뒤라, 클라가 그 사실을 몰라도 클라가 들고 있는 값이 정확히 `PreviousToken`
+    자리에 있게 되므로 2슬롯이 그대로 흡수함. 실제 문제는 없었음.
+  - **[미구현, 별도 항목으로 분리] 인게임 서버 비정상 종료 시 클라 자동 로비 복귀** -
+    위 경합 조사 중 발견한 진짜 구멍. 지금 `ClientInstance.OnNgoClientDisconnected`는
+    로그만 남기고 아무것도 안 함 - `RoomClosed`(정상 종료 시의 명시적 지시)를 못 받는
+    비정상 종료(인게임 서버 크래시 등) 시 클라가 스스로 로비로 안 돌아감. 다만 의도적으로
+    **자동 복귀시키지 않기로 결정** - "일부 게임은 로그인 화면으로 보내지만, 갑자기
+    접속이 끊기면 그냥 튕기는 게 맞다"는 판단. 재접속은 클라가 스스로(수동으로) 다시
+    시작하는 걸로 정리 - "인게임 서버 다운" 시나리오(세션 레지스트리 TTL 만료 기반)와
+    겹치는 부분이라 그쪽 설계와 충돌 안 하게 조율 필요.
+  - **[결정 - 코드 변경 없음] 게임 에이전트-인게임 서버 하트비트 종료 비대칭은 의도적으로
+    유지** - 인게임 서버는 게임 에이전트 연결이 끊기면(하트비트 타임아웃 포함) 자기
+    프로세스를 종료하는데(`GameManager.Shutdown()` → `Application.Quit()`), 게임
+    에이전트는 인게임 서버 연결이 끊겨도 안 죽고 부하 0으로 계속 살아있음. 처음엔
+    비대칭이 문제로 보였으나, **나중에 게임 에이전트가 유니티 `.exe`를 직접 자식
+    프로세스로 실행/재시작하는 슈퍼바이저 역할을 겸하게 될 예정**이라 - 슈퍼바이저는
+    자식이 죽어도 안 죽어야 다시 띄울 수 있으므로, 지금 비대칭이 오히려 그 미래 구조의
+    전제 조건과 정확히 맞음. 지금은 게임 에이전트/인게임 서버가 테스트 환경상 완전히
+    독립적으로 뜨고 있어서 이 부모-자식 관계 자체가 아직 없음 - 나중에 프로세스 스폰 +
+    종료 감지 + 재시작 로직 구현 필요.
+
 - **채팅 서버 - `IChatMessageStore`를 공유 저장소로 교체**
   - 지금 `InMemoryChatMessageStore`는 인스턴스 로컬 `ConcurrentDictionary`라서, 플레이어가
     다른 채팅 서버 인스턴스로 재접속하면 새 인스턴스는 그 채널의 과거 기록을 모른다.
@@ -418,19 +450,26 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     `JoinMatchRequest`/`WaitingPlayer`에 이미 있는 `game_type`별로 대기열을 나누는
     필터링도 같이 구현 필요(지금은 안 나뉘고 있음).
 
-- **로그인 서버(`LoginServer`/`AccountServer`) - 배관 완료, 검증 로직만 남음**
+- **로그인 서버(`LoginServer`/`AccountServer`) - 배관 완료, 검증 로직은 절반 완료**
   - [완료] 계정 검증/생성, 세션 레지스트리 권한 획득, 매칭 서버 로비 조회, 소유권 자발적
-    이관, 클라 최초 진입 전체 흐름. Unity `ClientInstance` 연동까지 완료(오늘 실제 빌드/
+    이관, 클라 최초 진입 전체 흐름. Unity `ClientInstance` 연동까지 완료(실제 빌드/
     테스트 통과).
-  - **[미구현] 토큰 2슬롯(`CurrentToken`/`PreviousToken`) 실제 대조 검증** - `PlayerSession`에
-    자료구조는 있지만, "제출된 토큰을 세션의 2슬롯과 TTL로 대조해서 거부"하는 로직 자체가
-    없음. 검증 지점은 이동 방향에 따라 다름:
-    - **로비→인게임**: 게임 에이전트의 `ConnectionApproval`이 검증해야 함(서버 간 소통을
-      게임 에이전트가 대신하므로). NGO 접속 payload에 토큰 추가, `ingame.proto`의
-      `ApprovalRequest`에 필드 추가, 게임 에이전트 검증 로직 신설 필요.
-    - **인게임→로비**: 로비의 `EnterLobby`가 검증해야 함. 지금은 무조건 새로 발급만 하고
-      대조는 안 함.
-    - 검증 실패 시 정책(조용히 통과 vs 실제 거부)도 미결.
+  - [완료] **토큰을 무작위 값으로 전환** - `DummyTokenProvider`가 예전엔 "토큰=playerId"라
+    2슬롯 대조가 실질적 효과가 없었음(누구나 playerId를 알면 토큰도 아는 셈). `Shared.Common/Auth/`로
+    이동하면서 `"{무작위값}:{playerId}"` 형식으로 개선 - `AuthInterceptor`가 여전히 파싱만으로
+    playerId를 꺼낼 수 있으면서도, 매 발급마다 값이 달라져 회전이 실제로 의미를 갖게 됨.
+  - [완료] **인게임→로비 (`EnterLobby`) 쪽 토큰 대조 검증** - `TokenVerification.IsValid`
+    (`Shared.Common/Auth/`, 순수 함수, 클라 받는 모든 서버가 공유하는 자리)로 제출된 토큰이
+    세션의 `CurrentToken`/`PreviousToken` 중 하나와 일치하는지 확인 후 통과/거부.
+    `AuthInterceptor`가 `context.UserState["token"]`에 원본 토큰도 같이 보존하도록 수정.
+    `LoginConnectionHandler`도 최초 토큰을 발급해서 세션에 심어두고(`LoginRedirect.token`)
+    클라에 전달 - 최초 진입/재접속이 같은 검증 경로로 자연스럽게 흡수됨.
+  - **[미구현] 로비→인게임 (`ConnectionApproval`) 쪽 토큰 대조 검증** - 게임 에이전트는
+    여전히 `OwnerServerId`만 보고 토큰은 전혀 안 봄. `ingame.proto`의 `ApprovalRequest`에
+    토큰 필드가 없고, NGO 접속 payload(지금 `playerId` 문자열 하나)도 토큰을 안 실음.
+    다음 작업 대상.
+  - 검증 실패 시 정책(조용히 통과 vs 실제 거부)은 `EnterLobby` 기준 "실제 거부"로 결정됨
+    (`INVALID_TOKEN` 에러) - `ConnectionApproval` 쪽도 같은 정책으로 갈 예정.
 
 ---
 

@@ -3,6 +3,7 @@ using AccountServer.Debug;
 using AccountServer.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
+using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Redis;
 
@@ -30,6 +31,11 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 
 // 계정 저장소 - 지금은 인메모리 더미. 진짜 SQL 서버가 생기면 이 등록만 교체.
 builder.Services.AddSingleton<IAccountRepository, InMemoryAccountRepository>();
+
+// 친구 삭제 이벤트를 채팅 서버에 알리기 위한 아웃박스(트랜잭션 아웃박스 패턴) + RabbitMQ.
+builder.Services.AddMainServerMessaging(builder.Configuration);
+builder.Services.AddSingleton<FriendEventOutbox>();
+builder.Services.AddHostedService<FriendEventPublisher>();
 
 builder.Services.AddGrpc();
 builder.Services.AddScoped<AccountControlService>();

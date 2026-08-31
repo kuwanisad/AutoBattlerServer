@@ -1,12 +1,13 @@
 using Confluent.Kafka;
 using LobbyServer.Auth;
-using LobbyServer.Debug;
 using LobbyServer.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Auth;
+using Shared.Common.Auth.Debug;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);

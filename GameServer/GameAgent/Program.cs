@@ -4,6 +4,8 @@ using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Auth;
+using Shared.Common.Auth.Debug;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -39,6 +41,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchServerConnect
 // Redis - Session Registry
 builder.Services.AddSessionRegistry();
 builder.Services.AddHostedService<ServerHeartbeatService>();
+
+// 토큰 검증 - 로비의 EnterLobby와 같은 판단 기준(TokenVerification)을 ConnectionApproval에서
+// 재사용한다. 지금은 검증(대조)만 하고 발급(회전)은 안 하지만, ITokenProvider도 미리
+// 주입 가능하게 해뒀다 - 나중에 "권한 이전 시 새 토큰도 같이 발급"하게 될 수 있어서.
+builder.Services.AddSingleton<ITokenProvider, DummyTokenProvider>();
 
 // GameServerHandler - 게임 서버 연결 처리
 builder.Services.AddSingleton<GameServerHandler>();

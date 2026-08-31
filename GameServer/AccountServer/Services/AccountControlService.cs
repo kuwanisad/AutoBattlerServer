@@ -14,11 +14,16 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
     private const int MaxPlayerIdRetries = 5;
 
     private readonly IAccountRepository _repository;
+    private readonly FriendEventOutbox _outbox;
     private readonly ILogger<AccountControlService> _logger;
 
-    public AccountControlService(IAccountRepository repository, ILogger<AccountControlService> logger)
+    public AccountControlService(
+        IAccountRepository repository,
+        FriendEventOutbox outbox,
+        ILogger<AccountControlService> logger)
     {
         _repository = repository;
+        _outbox = outbox;
         _logger = logger;
     }
 
@@ -87,5 +92,50 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         }
 
         return null;
+    }
+
+    public override async Task<GetFriendsResponse> GetFriends(
+        GetFriendsRequest request, ServerCallContext context)
+    {
+        var friends = await _repository.GetFriendsAsync(request.PlayerId);
+        var response = new GetFriendsResponse();
+        response.FriendPlayerIds.AddRange(friends);
+        return response;
+    }
+
+    public override async Task<AddFriendResponse> AddFriend(
+        AddFriendRequest request, ServerCallContext context)
+    {
+        var success = await _repository.AddFriendAsync(request.PlayerId, request.FriendPlayerId);
+        if (!success)
+        {
+            return new AddFriendResponse { Success = false, ErrorMessage = "계정을 찾을 수 없습니다." };
+        }
+
+        _logger.LogInformation("친구 추가: {PlayerId} ↔ {FriendPlayerId}", request.PlayerId, request.FriendPlayerId);
+        return new AddFriendResponse { Success = true };
+    }
+
+    public override async Task<RemoveFriendResponse> RemoveFriend(
+        RemoveFriendRequest request, ServerCallContext context)
+    {
+        var success = await _repository.RemoveFriendAsync(request.PlayerId, request.FriendPlayerId);
+        if (!success)
+        {
+            return new RemoveFriendResponse { Success = false, ErrorMessage = "계정을 찾을 수 없습니다." };
+        }
+
+        // 친구 목록 갱신(위 RemoveFriendAsync)과 이벤트를 아웃박스에 넣는 것을 최대한
+        // 붙여서 처리한다 - 둘 다 순수 인메모리 연산이라, 그 사이 프로세스가 죽을
+        // 위험 구간이 극히 짧다(트랜잭션 아웃박스 패턴 - 실제 RabbitMQ 발행이라는
+        // 네트워크 I/O는 별도 백그라운드 서비스(FriendEventPublisher)가 맡는다).
+        _outbox.Enqueue(new FriendRemovedEvent
+        {
+            PlayerId = request.PlayerId,
+            FriendPlayerId = request.FriendPlayerId,
+        });
+
+        _logger.LogInformation("친구 삭제: {PlayerId} ↔ {FriendPlayerId}", request.PlayerId, request.FriendPlayerId);
+        return new RemoveFriendResponse { Success = true };
     }
 }

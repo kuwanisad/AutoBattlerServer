@@ -6,6 +6,7 @@ using MainServer.Common.MatchConnection;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
+using Shared.Common.Auth;
 using Shared.Common.Redis;
 
 namespace GameAgent.Services;
@@ -37,6 +38,7 @@ public sealed class GameServerHandler
     private readonly MasterConnectionService _masterConnection;
     private readonly MatchServerConnection _matchServerConnection;
     private readonly ISessionRegistry _sessionRegistry;
+    private readonly ITokenProvider _tokenProvider;
     private readonly ILogger<GameServerHandler> _logger;
     private GameServerInfo? _serverInfo;
 
@@ -75,11 +77,13 @@ public sealed class GameServerHandler
         MasterConnectionService masterConnection,
         MatchServerConnection matchServerConnection,
         ISessionRegistry sessionRegistry,
+        ITokenProvider tokenProvider,
         ILogger<GameServerHandler> logger)
     {
         _masterConnection = masterConnection;
         _matchServerConnection = matchServerConnection;
         _sessionRegistry = sessionRegistry;
+        _tokenProvider = tokenProvider;
         _logger = logger;
     }
 
@@ -473,9 +477,25 @@ public sealed class GameServerHandler
             _logger.LogWarning("접속 거부 - 잘못된 상태: PlayerId={PlayerId} Status={Status}",
                 request.PlayerId, session.Status);
         }
+        else if (!TokenVerification.IsValid(session, request.Token))
+        {
+            // 로비의 EnterLobby와 완전히 같은 판단 기준(현재/직전 토큰 대조) - 검증 로직이
+            // 갈라지지 않도록 Shared.Common.Auth의 공용 함수를 그대로 재사용한다.
+            response.Approved = false;
+            response.Reason = "INVALID_TOKEN";
+            _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
+        }
         else
         {
-            // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인
+            // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인.
+            // "갱신 권한은 OwnerServerId를 가진 서버만" 원칙에 따라, 권한을 넘겨받는
+            // 이 시점에 새 토큰도 같이 발급/회전한다 - 로비의 EnterLobby가 하는 것과
+            // 같은 패턴(클레임 호출 전에 세션 객체에 미리 반영해서 원자적으로 같이 쓰임).
+            var newToken = _tokenProvider.GenerateToken(request.PlayerId);
+            session.PreviousToken = session.CurrentToken;
+            session.CurrentToken = newToken;
+            session.TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp();
+
             var claimed = await _sessionRegistry.TryClaimOwnershipAsync(
                 _masterConnection.InstanceId, request.PlayerId, session);
 
@@ -488,6 +508,7 @@ public sealed class GameServerHandler
             else
             {
                 response.Approved = true;
+                response.NewToken = newToken;
                 serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
                 _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
                     request.ClientId, request.PlayerId);

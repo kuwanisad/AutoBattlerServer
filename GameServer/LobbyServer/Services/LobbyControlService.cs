@@ -6,6 +6,7 @@ using MainServer.Common.MasterConnection;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
+using Shared.Common.Auth;
 using Shared.Common.Redis;
 
 namespace LobbyServer.Services;
@@ -74,6 +75,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     public override async Task<EnterLobbyResponse> EnterLobby(EnterLobbyRequest request, ServerCallContext context)
     {
         var playerId = context.UserState["playerId"] as string;
+        var submittedToken = context.UserState["token"] as string ?? string.Empty;
         if (string.IsNullOrEmpty(playerId))
         {
             return new EnterLobbyResponse { Success = false, ErrorMessage = "인증 정보 없음" };
@@ -88,6 +90,18 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         }
 
         var existing = await _sessionRegistry.GetAsync(playerId);
+
+        // 제출된 토큰이 세션의 현재/직전 토큰과 일치하는지 확인 (2슬롯 - 모바일 환경에서
+        // 회전 직후 접속이 끊겨 클라가 직전 세대 토큰을 들고 재접속하는 경우까지 허용).
+        // 로그인 서버가 막 이관해준 직후의 최초 진입도, 로그인 서버가 세션에 심어둔
+        // CurrentToken과 클라가 받은 토큰이 일치하므로 이 검증 하나로 자연스럽게 통과한다 -
+        // "최초 진입"과 "재접속"을 별도 분기로 나눌 필요가 없다.
+        if (!TokenVerification.IsValid(existing, submittedToken))
+        {
+            _logger.LogWarning("토큰 불일치로 로비 입장 거부: {PlayerId}", playerId);
+            return new EnterLobbyResponse { Success = false, ErrorMessage = "INVALID_TOKEN" };
+        }
+
         var newToken = _tokenProvider.GenerateToken(playerId);
 
         var newSession = new PlayerSession

@@ -1,3 +1,4 @@
+using ChatServer;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
@@ -28,6 +29,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionSe
 
 // 브로커
 builder.Services.AddMainServerMessaging(builder.Configuration);
+
+// 계정 서버가 발행하는 친구 삭제 이벤트를 구독해서 둘만의 채팅방을 정리한다
+// (수동 ack - 처리가 확실히 끝나야만 ack, 실패하면 재큐잉).
+builder.Services.AddHostedService<FriendRemovedSubscriber>();
 
 // Redis
 builder.Services.AddSessionRegistry();

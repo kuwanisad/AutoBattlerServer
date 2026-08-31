@@ -1,6 +1,7 @@
 using Grpc.Core;
 using MainServer.Common.MasterConnection;
 using Microsoft.Extensions.Logging;
+using Shared.Common.Auth;
 using Shared.Common.Redis;
 
 namespace LoginServer.Services;
@@ -12,9 +13,10 @@ public sealed class LoginControlService : LoginControl.LoginControlBase
     public LoginControlService(
         MasterConnectionService masterConnection,
         ISessionRegistry sessionRegistry,
+        ITokenProvider tokenProvider,
         ILogger<LoginControlService> logger)
     {
-        _handler = new LoginConnectionHandler(masterConnection, sessionRegistry, logger);
+        _handler = new LoginConnectionHandler(masterConnection, sessionRegistry, tokenProvider, logger);
     }
 
     public override Task Connect(

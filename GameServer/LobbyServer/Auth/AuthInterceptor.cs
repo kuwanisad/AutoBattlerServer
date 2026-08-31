@@ -1,14 +1,14 @@
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.Extensions.Logging;
+using Shared.Common.Auth;
 
 namespace LobbyServer.Auth;
 
 /// <summary>
-/// 모든 gRPC 요청에서 JWT 토큰을 자동으로 검증하는 인터셉터.
-/// Login/CreateAccount는 코드에서 제거됐다(3번 - 로그인 서버 분리 전까지 임시로 없앰).
-/// 지금은 EnterLobby부터 토큰이 필요하고, 그 토큰 자체는 클라가 처음엔 임의로 만든
-/// 값(사실상 playerId)을 그대로 제출하며, DummyTokenProvider가 검증을 사실상 통과시킨다.
+/// 모든 gRPC 요청에서 토큰을 자동으로 검증하는 인터셉터.
+/// Login/CreateAccount는 코드에서 제거됐다 - 로그인 서버가 최초 진입을 전담한다.
+/// 지금은 EnterLobby부터 토큰이 필요하다.
 /// </summary>
 public sealed class AuthInterceptor : Interceptor
 {
@@ -59,7 +59,12 @@ public sealed class AuthInterceptor : Interceptor
             throw new RpcException(new Status(StatusCode.Unauthenticated, "유효하지 않은 토큰입니다."));
         }
 
-        // 이후 핸들러에서 플레이어 ID를 꺼낼 수 있도록 저장
+        // 이후 핸들러에서 꺼낼 수 있도록 저장. 원본 토큰 문자열도 같이 남겨두는 이유:
+        // EnterLobby가 이걸로 세션의 CurrentToken/PreviousToken과 대조해야 하는데(재접속
+        // 시 "방금 밀려난 값"까지 허용하는 2슬롯 정책), playerId만으로는 그 대조를 할 수
+        // 없다 - 여기서 이미 파싱된 토큰을 재사용하지 않으면 핸들러가 헤더를 다시
+        // 파싱해야 하는 중복이 생긴다.
         context.UserState["playerId"] = playerId;
+        context.UserState["token"] = token;
     }
 }

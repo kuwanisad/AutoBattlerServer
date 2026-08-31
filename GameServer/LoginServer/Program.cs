@@ -2,6 +2,8 @@ using LoginServer.Services;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Auth;
+using Shared.Common.Auth.Debug;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,6 +25,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterConnectionSe
 // Redis - 로그인 서버가 세션 레지스트리에 직접 쓰기 접근하는 첫 사례다(관리 권한 획득/이관).
 builder.Services.AddSessionRegistry();
 builder.Services.AddHostedService<ServerHeartbeatService>();
+
+// 토큰 발급 - 로그인 서버가 최초 토큰을 발급하는 유일한 곳이다(EnterLobby는 발급/회전만
+// 하고 최초 발급은 안 함). ITokenProvider는 여러 서버가 공유하므로 Shared.Common에 있다.
+builder.Services.AddSingleton<ITokenProvider, DummyTokenProvider>();
 
 // 인증 없음 - 로그인 서버는 클라가 아직 아무 신원도 없는 상태에서 접속하는 최초
 // 진입점이라 AuthInterceptor 자체가 없다.

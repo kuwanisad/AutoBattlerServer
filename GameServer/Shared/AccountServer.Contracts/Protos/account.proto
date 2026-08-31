@@ -7,9 +7,18 @@ option csharp_namespace = "AccountServer";
 //
 // 메시지는 최대한 작게 유지한다 - 계정 검증/생성은 반려가 잦은 절차라, 필드마다
 // 실패할 때마다 다시 왕복하는 비용을 최소화하기 위함.
+//
+// 친구 목록: 로비 서버가 클라 대신 조회를 요청한다("클라1이 친구 목록 달래" → 로비가
+// GetFriends 호출). 친구 삭제는 RabbitMQ를 거쳐 채팅 서버에 통보된다(트랜잭션 아웃박스
+// 패턴 - 계정 서버가 친구 목록을 갱신하는 것과 이벤트를 발행하는 것 사이에 죽으면
+// 채팅 서버가 영영 모르게 되는 문제를 막기 위함) - 그래서 여기 RPC로는 안 나타난다.
 service AccountControl {
   rpc VerifyAccount(VerifyAccountRequest) returns (VerifyAccountResponse);
   rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+
+  rpc GetFriends(GetFriendsRequest) returns (GetFriendsResponse);
+  rpc AddFriend(AddFriendRequest) returns (AddFriendResponse);
+  rpc RemoveFriend(RemoveFriendRequest) returns (RemoveFriendResponse);
 }
 
 message VerifyAccountRequest {
@@ -31,4 +40,32 @@ message CreateAccountResponse {
   bool success = 1;
   string player_id = 2;      // 새로 발급된 playerId (GUID)
   string error_message = 3;  // 실패 시(예: 이미 존재하는 계정 ID)
+}
+
+message GetFriendsRequest {
+  string player_id = 1;
+}
+
+message GetFriendsResponse {
+  repeated string friend_player_ids = 1;
+}
+
+message AddFriendRequest {
+  string player_id = 1;
+  string friend_player_id = 2;
+}
+
+message AddFriendResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message RemoveFriendRequest {
+  string player_id = 1;
+  string friend_player_id = 2;
+}
+
+message RemoveFriendResponse {
+  bool success = 1;
+  string error_message = 2;
 }

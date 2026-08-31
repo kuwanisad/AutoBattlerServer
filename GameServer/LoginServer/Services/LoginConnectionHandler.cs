@@ -5,6 +5,7 @@ using MainServer.Common.MasterConnection;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
+using Shared.Common.Auth;
 using Shared.Common.Redis;
 using System.Net.Http;
 
@@ -32,15 +33,18 @@ internal sealed class LoginConnectionHandler
 
     private readonly MasterConnectionService _masterConnection;
     private readonly ISessionRegistry _sessionRegistry;
+    private readonly ITokenProvider _tokenProvider;
     private readonly ILogger _logger;
 
     internal LoginConnectionHandler(
         MasterConnectionService masterConnection,
         ISessionRegistry sessionRegistry,
+        ITokenProvider tokenProvider,
         ILogger logger)
     {
         _masterConnection = masterConnection;
         _sessionRegistry = sessionRegistry;
+        _tokenProvider = tokenProvider;
         _logger = logger;
     }
 
@@ -99,10 +103,17 @@ internal sealed class LoginConnectionHandler
         }
 
         // 4. 세션 레지스트리 관리 권한 획득 시도 (자기 자신으로 클레임)
+        // 여기서 초기 토큰도 같이 발급해서 세션에 심어둔다 - 클라가 이후 로비에서
+        // EnterLobby를 부를 때 이 토큰을 제출하면, 로비의 TokenVerification이 세션의
+        // CurrentToken과 대조해서 통과시킨다(로그인 서버가 이미 심어둔 값과 같으므로).
+        var initialToken = _tokenProvider.GenerateToken(playerId);
+
         var newSession = new PlayerSession
         {
             Status = PlayerStatus.Lobby, // 곧 로비로 보낼 것이므로 최종 상태를 미리 반영
             CurrentServer = _masterConnection.SelfAddress,
+            CurrentToken = initialToken,
+            TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp(),
         };
 
         var claimResult = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
@@ -139,7 +150,12 @@ internal sealed class LoginConnectionHandler
 
         await TrySendAsync(responseStream, new LoginToClientMessage
         {
-            Redirect = new LoginRedirect { LobbyAddress = lobby.Value.Address, PlayerId = playerId },
+            Redirect = new LoginRedirect
+            {
+                LobbyAddress = lobby.Value.Address,
+                PlayerId = playerId,
+                Token = initialToken,
+            },
         }, cancellationToken);
 
         // 7. 스트림 종료 - 클라는 이 로그인 서버로 다시 안 온다.

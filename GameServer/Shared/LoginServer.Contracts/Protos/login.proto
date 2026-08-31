@@ -36,8 +36,11 @@ message LoginToClientMessage {
 
 message LoginRedirect {
   string lobby_address = 1;
-  string player_id = 2;  // 클라가 이후 로비에서 EnterLobby를 부를 때 필요 (지금 토큰
-                          // 스킴에서는 토큰 = playerId라 이 값을 그대로 토큰으로 쓰면 됨)
+  string player_id = 2;  // 클라가 이후 로비 요청 시 필요 (playerId 자체를 알아야 하는
+                          // 화면/로직이 있을 수 있음)
+  string token = 3;       // 로그인 서버가 발급한 초기 토큰. 이제 토큰 ≠ playerId(무작위
+                           // 값)라 별도로 내려줘야 한다 - 클라는 이후 로비에서 EnterLobby를
+                           // 부를 때 이 값을 Bearer 토큰으로 쓴다.
 }
 
 // reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치, 생성도 실패),
