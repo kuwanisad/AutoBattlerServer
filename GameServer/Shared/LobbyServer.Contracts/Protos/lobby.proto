@@ -34,11 +34,27 @@ service LobbyControl {
   // 있습니다" 안내를 띄울 수 있다. 성공하면 새 토큰을 발급해서 함께 돌려준다.
   rpc EnterLobby(EnterLobbyRequest) returns (EnterLobbyResponse);
 
+  // EnterLobby 성공 직후 클라가 연다. 내용을 주고받을 필요는 없고, 이 연결이 살아있다는
+  // 사실 자체가 "클라가 아직 로비에 있다"는 증거다 - 하트비트 메시지 없이, 스트림이
+  // 끊기는 순간을 서버가 즉시 감지해서 세션을 정리한다(단, 그 순간 이미 다른 서버로
+  // 넘어가는 중이었다면 - Status가 Moving으로 바뀌어 있으면 - 정상적인 이동이므로
+  // 건드리지 않는다). 로비는 반응성이 필요 없는 서버라 주기적 하트비트 대신 이 방식이
+  // 더 가볍다(클라 수만큼 반복 발생하는 메시지가 없음).
+  rpc StayConnected(StayConnectedRequest) returns (stream StayConnectedEvent);
+
   // === 매치메이킹 ===
   // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
   // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
   rpc RequestMatch(MatchRequest) returns (stream MatchEvent);
   rpc CancelMatch(CancelMatchRequest) returns (CancelMatchResponse);
+
+  // === 친구 관리 ===
+  // 클라를 직접 상대하는 메인 서버(로비, 나중에 인게임도)의 창구 - 계정 서버의 실제
+  // 저장소를 대리 호출한다. 채팅 서버는 이 창구를 거치지 않는다(자기가 친구인지 스스로
+  // 판단 안 함 - "서비스 제공 가능 여부는 전적으로 메인 서버한테 맡긴다"는 원칙).
+  rpc GetFriends(GetFriendsRequest) returns (GetFriendsResponse);
+  rpc AddFriend(AddFriendRequest) returns (AddFriendResponse);
+  rpc RemoveFriend(RemoveFriendRequest) returns (RemoveFriendResponse);
 }
 
 // === 세션 ===
@@ -50,6 +66,13 @@ message LogoutResponse {
 }
 
 message EnterLobbyRequest {}
+
+message StayConnectedRequest {}
+
+// 내용 없음 - 스트림이 살아있다는 사실 자체가 목적이라 실제로 이벤트를 보낼 필요가
+// 거의 없다. 나중에 "당신 앞으로 대기줄이 몇 명 남았습니다" 같은 로비 전용 알림이
+// 필요해지면 여기 필드를 채우면 된다.
+message StayConnectedEvent {}
 
 message EnterLobbyResponse {
   bool success = 1;
@@ -109,4 +132,32 @@ message CancelMatchRequest {}
 
 message CancelMatchResponse {
   bool success = 1;
+}
+
+// === 친구 관리 ===
+// playerId는 토큰에서 인증된 값을 그대로 쓴다(context.UserState) - 요청 메시지에
+// 자기 자신의 playerId를 안 담는 이유.
+
+message GetFriendsRequest {}
+
+message GetFriendsResponse {
+  repeated string friend_player_ids = 1;
+}
+
+message AddFriendRequest {
+  string friend_player_id = 1;
+}
+
+message AddFriendResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message RemoveFriendRequest {
+  string friend_player_id = 1;
+}
+
+message RemoveFriendResponse {
+  bool success = 1;
+  string error_message = 2;
 }

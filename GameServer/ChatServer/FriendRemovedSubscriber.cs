@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using MainServer.Common.Messaging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,24 +16,27 @@ internal sealed class FriendRemovedEvent
 
 /// <summary>
 /// AccountServer가 발행하는 "friend-removed" 큐를 구독해서, 삭제된 두 사람의 둘만의
-/// 채팅방을 정리한다. RabbitMqConsumer의 수동 ack 방식을 그대로 쓴다 - 처리(방 삭제)가
-/// 확실히 끝나야만 ack를 보내고, 실패하면 재큐잉돼서 나중에 다시 시도된다.
-///
-/// [미구현] 실제 "둘만의 채팅방을 찾아서 지우는" 로직은 아직 없다 - 채팅방 생성/관리
-/// 자체가 이번 라운드에서 범위 밖으로 미뤄졌기 때문(계정 정보 확장부터 먼저 하기로 함).
-/// 지금은 이벤트를 받아서 로그만 남기고 ack하는 자리표시자 - 배선(발행→구독→ack)
-/// 자체가 끝까지 동작하는지만 검증하는 용도.
+/// 채팅방을 실제로 정리한다. RabbitMqConsumer의 수동 ack 방식을 그대로 쓴다 - 처리(방
+/// 삭제)가 확실히 끝나야만 ack를 보내고, 실패하면 재큐잉돼서 나중에 다시 시도된다.
 /// </summary>
 public sealed class FriendRemovedSubscriber : IHostedService
 {
     private const string FriendRemovedQueueName = "friend-removed";
 
     private readonly RabbitMqConsumer _consumer;
+    private readonly IChatRoomStore _roomStore;
+    private readonly ChatConnectionRegistry _connections;
     private readonly ILogger<FriendRemovedSubscriber> _logger;
 
-    public FriendRemovedSubscriber(RabbitMqConsumer consumer, ILogger<FriendRemovedSubscriber> logger)
+    public FriendRemovedSubscriber(
+        RabbitMqConsumer consumer,
+        IChatRoomStore roomStore,
+        ChatConnectionRegistry connections,
+        ILogger<FriendRemovedSubscriber> logger)
     {
         _consumer = consumer;
+        _roomStore = roomStore;
+        _connections = connections;
         _logger = logger;
     }
 
@@ -45,7 +48,7 @@ public sealed class FriendRemovedSubscriber : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-    private Task<bool> HandleAsync(string json)
+    private async Task<bool> HandleAsync(string json)
     {
         FriendRemovedEvent? evt;
         try
@@ -54,24 +57,47 @@ public sealed class FriendRemovedSubscriber : IHostedService
         }
         catch (JsonException ex)
         {
-            // 파싱 자체가 불가능한 메시지 - 재큐잉해봤자 계속 실패할 게 뻔하므로(영구적
-            // 실패) true를 반환해서 ack시키고 버린다. false/예외를 던지면 무한 재전달
-            // 루프가 될 위험이 있다.
             _logger.LogError(ex, "친구 삭제 이벤트 파싱 실패 - 버림: {Json}", json);
-            return Task.FromResult(true);
+            return true; // 영구적 실패 - 재큐잉해도 계속 실패하므로 ack시키고 버린다
         }
 
         if (evt == null || string.IsNullOrEmpty(evt.PlayerId) || string.IsNullOrEmpty(evt.FriendPlayerId))
         {
             _logger.LogError("친구 삭제 이벤트 필드 누락 - 버림: {Json}", json);
-            return Task.FromResult(true);
+            return true;
         }
 
-        // TODO: 둘만의 채팅방(friend:{friendshipId} 채널)을 찾아서 실제로 정리하는 로직.
-        // 지금은 배선 검증용 로그만 남긴다.
-        _logger.LogInformation("친구 삭제 이벤트 수신 (방 정리 로직 미구현): {PlayerId} ↔ {FriendPlayerId}",
-            evt.PlayerId, evt.FriendPlayerId);
+        var channelId = IChatRoomStore.ComputeChannelId(evt.PlayerId, evt.FriendPlayerId);
+        await _roomStore.RemoveRoomAsync(channelId);
 
-        return Task.FromResult(true);
+        // 접속 중인 쪽이 있으면 방이 무효화됐다고 알린다. 오프라인이면 다음에 GetMyRooms를
+        // 불렀을 때 자연스럽게 안 보이게 되므로 별도 처리가 필요 없다.
+        await NotifyIfConnectedAsync(evt.PlayerId, channelId);
+        await NotifyIfConnectedAsync(evt.FriendPlayerId, channelId);
+
+        _logger.LogInformation("친구 삭제로 채팅방 정리 완료: {PlayerId} ↔ {FriendPlayerId} (ChannelId={ChannelId})",
+            evt.PlayerId, evt.FriendPlayerId, channelId);
+
+        return true;
+    }
+
+    private async Task NotifyIfConnectedAsync(string playerId, string channelId)
+    {
+        var connection = _connections.TryGet(playerId);
+        if (connection == null || connection.WebSocket.State != System.Net.WebSockets.WebSocketState.Open)
+        {
+            return;
+        }
+
+        var message = new ChatContracts.ServerChatMessage
+        {
+            RoomRemoved = new ChatContracts.RoomRemoved { ChannelId = channelId },
+        };
+
+        var bytes = Google.Protobuf.MessageExtensions.ToByteArray(message);
+        await connection.WebSocket.SendAsync(
+            new ArraySegment<byte>(bytes), System.Net.WebSockets.WebSocketMessageType.Binary,
+            endOfMessage: true, CancellationToken.None);
     }
 }
+

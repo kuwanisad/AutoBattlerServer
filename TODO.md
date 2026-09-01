@@ -97,14 +97,10 @@
   재접속을 시도하는 것 자체를 막을 방법은 없다(구조적 한계). 레이트 리밋도 이 경합을
   "없애주는" 게 아니라는 걸 명확히 함 - 레이트 리밋은 순수 남용 방지용이고, 반영이
   끝나기 전 재시도는 여전히 정상적으로 거부되며 그건 버그가 아니라 정확한 응답이다.
-- **[미구현] `EnterLobby`에 서버 쪽 rate limit 도입** - 업계 조사 결과, 레이트 리밋 시간과
-  "세션 반영에 실제로 얼마나 걸리는지"를 맞출 필요가 없다는 걸 확인함(둘은 별개 관심사 -
-  레이트 리밋은 순수 남용 방지, 정확성은 매번 최신 상태로 응답하는 실제 로직이 담당).
-  그러니 짧고 고정된 쿨다운이면 충분: Redis `SET ratelimit:enterlobby:{playerId} 1 PX 300 NX`
-  - NX(없을 때만 성공)+PX(TTL)로 원자적 처리. 로컬 메모리가 아니라 Redis에 두는 이유는
-  로비가 여러 대라 로컬에 두면 다른 로비로 우회 가능하기 때문. `ISessionRegistry`(관리
-  권한 기록부 전용 원칙)에는 안 얹고, 같은 지연 연결 패턴(`SessionRegistryConnector`)의
-  별도 작은 인터페이스로 분리하는 방향.
+- **[완료] `EnterLobby`에 서버 쪽 rate limit 도입** - `IRateLimiter`(`Shared.Common.Redis`)를
+  `SessionRegistryConnector`가 같은 지연 연결로 프록시. `SET NX PX 300ms`로 원자적 판단.
+  `EnterLobbyResponse.rate_limited` 필드 추가. (참고: 이 항목 바로 위에 남아있던 설계
+  논의 내용은 실제 구현에 그대로 반영됨.)
 
 **방 소속 자료구조 (인게임 서버 쪽) - [완료]**
 ```csharp
@@ -127,12 +123,10 @@ internal sealed class NormalRoom : Room { /* AllowReconnect = true (예시 정�
   `Room.ConnectedClients`를 실시간으로 갱신함.
 - 별도의 "아직 방에 배정 안 된 클라" 임시 풀은 안 만듦(그런 시점 자체가 없음).
 
-**[미구현] 게임 에이전트의 자체 방-채움 타임아웃 - 설계 확정**
+**[완료] 게임 에이전트의 자체 방-채움 타임아웃**
 
 방 열린 뒤 일정 시간 안에 `ExpectedPlayerIds` 전원이 `ConnectedClients`에 다 들어왔는지
-확인하는 타이머. "판단 시점"(타이머 만료)과 "실행 시점"(실제 방 정리) 사이에 상태가
-바뀔 수 있는 경합(예: 마지막 결원이 접속하는 순간과 타이머 만료가 겹침)이 있어서,
-아래처럼 재검증 단계를 끼워넣기로 함:
+확인하는 타이머. 아래는 설계 논의 기록(전부 실제 구현에 반영됨):
 
 **⚠ 별개로 짚은 것 - "게임 시작" 트리거는 타이머랑 완전히 무관해야 함.**
 처음 설계엔 "다 찼을 때 뭘 하는지"가 빠져 있어서, 자칫 타이머의 자기 확인 로직에
@@ -260,13 +254,11 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
 요청에 없는 클라가 접속한 경우 → 접속 끊음
   (OwnerServerId 기반 ConnectionApproval이 이미 처리 - 별도 구현 불필요)
 
-[미구현] 8번: 방 열린 뒤 일정 시간 대기 → 전원 접속했는지 자체 확인
+[완료] 8번: 방 열린 뒤 일정 시간 대기 → 전원 접속했는지 자체 확인
   클라가 방에 모두 접속 → 게임 시작
   방에 결원 존재 → 매칭 서버한테 로비 주소 요청 → (위 CancelRoom과 같은 처리)
-  ※ 이 "일정 시간 대기 후 결원 체크" 타이머 자체가 아직 게임 에이전트에 없다.
-    GameServerHandler가 PrepareMatch로 받은 기대 플레이어 목록과 실제 PlayerJoined
-    수신 현황을 비교하는 로직 + 타이머 신설 필요. 지금 구현된 CancelRoom 처리는
-    "매칭 서버가 먼저 취소를 요청한 경우"에만 반응하는 수동적인 경로다.
+  → `RoomTimeout`(인게임→게임에이전트 신규 메시지)/`PendingKill`로 구현 완료,
+    실제 엔드투엔드 테스트로 검증됨.
 ```
 
 **"일부만 접속 실패 시 방 전체 취소" 정책 - 의도적 결정**
@@ -425,41 +417,51 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     독립적으로 뜨고 있어서 이 부모-자식 관계 자체가 아직 없음 - 나중에 프로세스 스폰 +
     종료 감지 + 재시작 로직 구현 필요.
 
-- **채팅 서버 - `IChatMessageStore`를 공유 저장소로 교체 (여전히 미착수)**
-  - 지금 `InMemoryChatMessageStore`는 인스턴스 로컬 `ConcurrentDictionary`라서, 플레이어가
-    다른 채팅 서버 인스턴스로 재접속하면 새 인스턴스는 그 채널의 과거 기록을 모른다.
-    (세션 레지스트리가 로컬 config였을 때 겪었던 것과 같은 종류의 문제.)
-  - "서버 이동 시 이전 채팅 기록을 다시 불러와야 한다"는 요구사항은 이걸로 해결해야 하고,
-    Kafka/RabbitMQ로 해결할 문제가 아니다 - 메시지를 그 공유 저장소로 흘려보내는
-    파이프라인 역할 정도는 할 수 있지만, 조회 가능한 저장소 자체를 대체하진 못한다.
-  - Redis(리스트/정렬 집합) 또는 DB로 교체하는 방향. `ISessionRegistry`를 지연 연결 프록시로
-    바꿨던 방식(`SessionRegistryConnector`)을 참고할 수 있음.
+- **채팅 서버 - [완료] 전면 재설계** (`IChatMessageStore` 공유 저장소 교체 포함)
+  - 예전 파일들(`ChatChannelManager`, 인메모리 `IChatMessageStore` 등)은 전부 구버전으로
+    간주하고 처음부터 재작성함.
+  - [완료] **영속 저장소** - `ChatRedisConnection`(세션 레지스트리와 완전히 별개인 채팅
+    서버 전용 Redis 연결/키스페이스 `chat:`) 기반으로 `IChatRoomStore`/`RedisChatRoomStore`
+    (1:1 방 멤버십)와 `IChatMessageStore`/`RedisChatMessageStore`(Sorted Set, 시간순
+    페이지네이션)를 새로 만듦 - 예전 "인스턴스 로컬이라 다른 인스턴스로 재접속하면 기록을
+    모름" 문제가 이걸로 자동 해결됨.
+  - [완료] **인증** - `WebSocketHandler` 핸드셰이크 시점에 playerId+token을 받아
+    `TokenVerification.IsValid`(읽기 전용)로 검증. 채팅 서버는 절대 토큰을 회전시키지
+    않음("서비스 제공 가능 여부는 전적으로 메인 서버한테 맡긴다"는 원칙 - `ARCHITECTURE.md`
+    참고).
+  - [완료] **`RequestChat`/`GetMyRooms`/`GetHistory` 신설** - `RequestChat`은 "관리"가
+    아니라 클라가 이미 붙어있는 채팅 서버에 직접 요청(로비를 안 거침). 채팅 서버가 내부적으로
+    (읽기 전용) `AccountServer.GetFriends`를 불러 진짜 친구 사이인지 확인 후 `roomId`를
+    결정론적으로 계산(`friend:{정렬된 두 playerId}`)해서 방 생성. `GetHistory`는 개수
+    기반 페이지네이션 - 로비/인게임 등 서버 불문 클라의 요청 형태가 통일돼 있어서 어느
+    화면에서 채팅창을 열든 같은 방식으로 씀.
+  - [완료] **`FriendRemovedSubscriber` 완성** - 이벤트 수신 시 실제로 `RemoveRoomAsync` +
+    접속 중인 양쪽에 `RoomRemoved` 알림까지 수행 (예전엔 로그만 찍는 자리표시자였음).
+  - [완료] **클라(Unity) 쪽 전체 신설** - `IChatChannel`/`WebSocketChatChannel`/`ChatClient`.
+    끊기면 지수 백오프로 스스로 재연결(인게임의 "튕기면 그냥 튕긴다"와 의도적으로 다른
+    정책 - 채팅은 반응성이 필요 없는 유틸리티 연결이라서). "오는 채팅만 받게" 만들고
+    표시 방식은 UI가 나중에 알아서 하도록 범위를 명확히 좁힘.
+  - [완료] **친구 삭제-메시지 전송 race 방어** - `RoomRemoved` 통보 이후 새는 메시지를
+    클라 쪽에서 조용히 버리는 "차단 목록" 방식(허용 목록 방식은 동기화 지연 때문에
+    정상 메시지를 잘못 거를 위험이 있어서 기각). `RoomInvited`/`RequestChatAck` 성공 시
+    차단 목록에서 제거해서 재친구 추가 시 영구 차단 안 되게 함.
+  - [완료] **`SystemChatDelivery` 프로토콜 신설** - 채팅 서버가 직접 보내는 안내(친구가
+    보낸 게 아님)를 `ChatMessageDelivery`와 완전히 다른 `oneof` 케이스로 분리. "빈
+    sender_id = 시스템 메시지" 같은 필드 값 기반 규약은 스푸핑 위험이 있어서 기각하고,
+    타입 자체가 신뢰의 근거가 되도록 설계 (`KNOWN_ISSUES.md` #9 참고). 내부에 다시
+    `oneof`(`ChatNotice`/`GlobalNotice`)를 둬서 "특정 방 종속 안내"/"방 무관 전역 안내"도
+    구조적으로 분리. **실제로 이 메시지를 보내는 서버 쪽 로직은 아직 없음(프로토콜/클라
+    수신 경로만 준비)** - 필요한 기능(예: "채팅이 금지되었습니다")이 생기면 그때 구현.
+  - **[미구현] 인게임 서버에서도 친구 관리 명령어 지원** - "인게임 서버에서도 명령어로
+    친구 추가/삭제가 가능해야 한다"는 요구사항. NGO 커스텀 메시지(클라→인게임 서버) →
+    게임 에이전트 릴레이 → `AccountServer` 호출 → 응답 역방향까지, `RoomClosed`/
+    `TokenUpdate` 만들 때 쓴 패턴을 통째로 하나 더 만드는 규모라 다음으로 미룸.
+  - **[미구현] `AccountServer`/계정 데이터의 진짜 DB 전환** - 지금 `InMemoryAccountRepository`는
+    여전히 더미. 친구 목록 아웃박스(`FriendEventOutbox`)도 이때 같이 DB 테이블로
+    옮겨서 진짜 트랜잭션으로 묶을 것.
 
-- **친구 시스템 - 계정 정보 확장까지 [완료], 채팅방 생성/관리는 범위 밖으로 분리**
-  - 원래 요구사항(클라 접속 시 친구 목록 조회, 대화 요청 시 방 생성+초대, 메시지 알림,
-    친구 삭제 시 방 정리+양쪽 목록 갱신, UI가 방 열 때 과거 기록 제공) 중 **계정 쪽만
-    오늘 완료** - "범위가 너무 넓으면 계정 정보 확장부터"라는 판단에 따름.
-  - [완료] `AccountServer`에 친구 목록(`AccountRecord.Friends`, `HashSet<playerId>`) +
-    `GetFriends`/`AddFriend`/`RemoveFriend` RPC. 로비 서버가 클라 대신 `GetFriends`를
-    대리 요청하는 구조로 확정(인게임 서버는 애초에 이런 요청을 할 처지가 아님).
-  - [완료] **트랜잭션 아웃박스 패턴 도입** - `RemoveFriend`가 계정 정보 갱신 후 채팅
-    서버에 알려야 하는데, 이 사이에 계정 서버가 죽으면 채팅 서버가 영영 모르게 되는
-    "이중 쓰기 문제"를 막기 위함. 친구 목록 갱신과 "이벤트를 나중에 발행해야 함" 기록을
-    같은 자리(순수 인메모리, 원자적)에 같이 남기고, 별도 백그라운드 서비스
-    (`FriendEventPublisher`)가 그 기록을 계속 훑으면서 RabbitMQ 발행을 시도 - 확실히
-    성공해야만 기록을 지움. 지금은 계정 데이터 자체가 인메모리 더미라 완전한
-    durability는 없음 - 나중에 진짜 DB로 옮기면 이 아웃박스도 DB 테이블로 이전해서
-    같은 트랜잭션으로 묶을 것.
-  - [완료] **RabbitMQ 수동 ack 컨슈머 신설** (`RabbitMqConsumer`, `MainServer.Common.Messaging`,
-    처음으로 실제 사용됨 - 예전엔 프로듀서만 등록되고 아무도 안 씀). 받고→처리하고→ack
-    (실패 시 재큐잉) 방식. 아웃박스(최소 한 번 발행)와 짝을 이뤄 "최소 한 번 처리"를
-    보장 - 그래서 소비 쪽 로직은 멱등해야 함(같은 이벤트 두 번 받아도 결과 같아야 함).
-  - **[미구현] 실제 방 정리 로직** - `ChatServer.FriendRemovedSubscriber`가 이벤트를
-    받아서 로그만 남기고 ack하는 자리표시자 상태 - 채팅방(둘만의 `friend:{friendshipId}`
-    채널) 생성/관리 자체가 아직 없어서 실제로 지울 대상이 없음. 채팅방 생성/메시지
-    알림/기록 제공 전체가 다음 라운드로 미뤄짐.
-  - **[결정] `ChatServer/Program.cs`의 `AddMainServerMessaging()`는 이제 실제로 쓰임**
-    (컨슈머 등록) - 예전 메모("등록만 되고 안 쓰임")는 무효화됨.
+- **친구 시스템 - [완료]** (위 채팅 서버 항목과 통합됨 - 계정 확장 + 채팅방 생성/관리
+  전부 완료)
 
 - **매칭 서버 - 배관 전부 완료, 남은 건 실력 기반 알고리즘뿐**
   - [완료] 접속 유지 스트림, 매칭↔게임에이전트 전체 RPC, 매칭 확정/취소 통보, 실제 방
@@ -487,12 +489,41 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     `AuthInterceptor`가 `context.UserState["token"]`에 원본 토큰도 같이 보존하도록 수정.
     `LoginConnectionHandler`도 최초 토큰을 발급해서 세션에 심어두고(`LoginRedirect.token`)
     클라에 전달 - 최초 진입/재접속이 같은 검증 경로로 자연스럽게 흡수됨.
-  - **[미구현] 로비→인게임 (`ConnectionApproval`) 쪽 토큰 대조 검증** - 게임 에이전트는
-    여전히 `OwnerServerId`만 보고 토큰은 전혀 안 봄. `ingame.proto`의 `ApprovalRequest`에
-    토큰 필드가 없고, NGO 접속 payload(지금 `playerId` 문자열 하나)도 토큰을 안 실음.
-    다음 작업 대상.
-  - 검증 실패 시 정책(조용히 통과 vs 실제 거부)은 `EnterLobby` 기준 "실제 거부"로 결정됨
-    (`INVALID_TOKEN` 에러) - `ConnectionApproval` 쪽도 같은 정책으로 갈 예정.
+  - [완료] **로비→인게임 (`ConnectionApproval`) 쪽 토큰 대조 검증** - `ingame.proto`의
+    `ApprovalRequest`/`ApprovalResponse`에 각각 `token`/`new_token` 필드 추가, NGO 접속
+    payload를 `"{playerId}|{token}"` 형식으로 변경. `EnterLobby`와 같은 `TokenVerification.IsValid`
+    재사용. 검증 실패 시 "실제 거부"(`EnterLobby`와 같은 정책)로 확정.
+
+- **로비 생존 감지 - [완료] `StayConnected` 스트림 신설**
+  - 로비는 클라와 지속 연결이 없어서(단항 RPC만 오감), "로비에 조용히 앉아있는 클라가
+    끊겼는지"를 감지할 방법이 없었음(세션 TTL 24시간은 이 용도가 아니었음 - 아래 항목
+    참고). `StayConnected` 스트림을 `EnterLobby` 성공 직후 열어서, 연결이 살아있다는
+    사실 자체로 생존을 판단.
+  - 매치 확정으로 정상 이동 중인 경우와 구분하기 위해, 스트림 종료 시 `OwnerServerId`뿐
+    아니라 `session.Status`도 같이 확인(`Status == Lobby`일 때만 삭제) - 자세한 경위는
+    `KNOWN_ISSUES.md` #6 참고.
+  - Unity 쪽 `GrpcLobbyChannel.StayConnectedAsync`도 `EnterLobbyAsync` 성공 직후 자동으로
+    시작, 채널 Dispose 시 자연스럽게 같이 끊김.
+
+- **세션 무효화 강제 전파 - [완료] `SessionInvalidated` 이벤트**
+  - 로비/게임 에이전트가 세션을 지우는 모든 지점(로그아웃, `StayConnected` 끊김, 재접속
+    유예 타임아웃)에서 RabbitMQ로 `SessionInvalidated{playerId}` 발행. `ChatServer`가
+    구독해서 이미 무효화된 세션의 웹소켓 연결을 강제 종료 - "서비스 제공 가능 여부는
+    전적으로 메인 서버한테 맡긴다"는 원칙의 반대편 구현.
+
+- **세션 TTL(24시간) 완전 제거 - [완료]**
+  - `session:{playerId}`의 TTL 역할을 서로 다르게 이해하고 있었음이 논의 중 드러남 -
+    실제로는 갱신되는 일이 없는 "정상 정리 실패 시 최후 안전망"이었을 뿐, 개별 세션
+    생존을 능동적으로 감지하는 용도가 아니었음(그건 `server:{serverId}`의 지속 갱신
+    TTL이 담당). 자세한 경위는 `KNOWN_ISSUES.md` #5 참고.
+  - `RedisSessionRegistry`의 `UpdateAsync`/`TryClaimOwnershipWithPreviousOwnerAsync`에서
+    `EX` 옵션 제거 - 이제 세션 자체엔 TTL이 없음(영구). 개별 세션 생존 여부는 소유
+    서버의 `server:{serverId}` TTL로만 판단.
+
+- **`Server/KNOWN_ISSUES.md` 신설 - [완료]**
+  - 오늘 발견/해결한 12개 문제를 발견-원인-예상 피해-해결 방법-결과 형식으로 기록.
+    `ARCHITECTURE.md`의 "보안" 섹션도 오늘 최종 구조에 맞게 전면 갱신하고 관련 항목마다
+    상호 링크 연결.
 
 ---
 
@@ -543,8 +574,6 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     이미 5300을 쓰고 있어서 처음 배정했던 5300과 충돌났던 적 있음 - 새 서버 포트 잡을 땐
     `start-servers.ps1`/기존 서버들 전체와 대조 필수). `start-servers.ps1`/`stop-servers.ps1`에
     두 서버 추가 완료 (마스터→매칭 다음, DummySubServer 이전 순서).
-  - **[미구현]** 실제로 "제출된 토큰을 세션의 2슬롯과 대조"하는 검증 로직 - 여전히
-    미구현 상태(이전 항목과 동일). `EnterLobby`/`ConnectionApproval` 양쪽 다.
 
 
 - [완료] **인증 체계 임시 개편 (3번 결정) + 세션 레지스트리 토큰 2슬롯 (1번 결정)**
@@ -562,11 +591,10 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     `LobbyClient.SetToken`으로 주입해 `EnterLobby`를 부르고, 성공 시 받은 토큰을
     `_cachedToken`에 저장 - 이 필드는 `LobbyClient`/`GrpcLobbyChannel`이 게임 세션마다
     Dispose되고 새로 만들어져도 살아남아서, 게임 종료 후 새 로비로 돌아갈 때 재사용됨.
-  - **[미구현]** 실제로 "제출된 토큰을 세션의 2슬롯과 TTL로 대조해서 거부"하는 로직
-    자체는 없음. 검증 지점은 방향에 따라 다름 - **로비→인게임**은 게임 에이전트의
-    `ConnectionApproval`이(서버 간 소통 대신하므로), **인게임→로비**는 로비의
-    `EnterLobby`가. 지금은 둘 다 이 대조를 안 하고 무조건 통과/재발급함 - 재접속
-    정책 전체를 다룰 때 같이 구현 예정.
+  - [완료] **토큰 2슬롯 실제 대조 검증** - 당시엔 미구현이었으나, 이후 `EnterLobby`/
+    `ConnectionApproval` 양쪽 다 `TokenVerification.IsValid`로 구현 완료(위 "로그인
+    서버" 항목 참고). 또한 이 시점의 "토큰=playerId" 스킴 자체도 나중에 무작위값으로
+    교체됨(`KNOWN_ISSUES.md` #2).
 
 - [완료] **게임 종료 후 클라 로비 복귀 - 실제 재접속까지 확인**
   - `ClientInstance.OnRoomClosedMessageReceived`가 `RoomClosed` 메시지 받으면: 확인

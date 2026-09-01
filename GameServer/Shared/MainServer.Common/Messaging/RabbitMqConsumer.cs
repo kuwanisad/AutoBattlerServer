@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -55,12 +55,15 @@ public sealed class RabbitMqConsumer : IDisposable
             VirtualHost = _options.VirtualHost,
         };
 
-        _connection = factory.CreateConnection();
-        _channel = _connection.CreateModel();
-        _channel.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false);
-        _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+        var connection = factory.CreateConnection();
+        var channel = connection.CreateModel();
+        channel.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false);
+        channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
 
-        var consumer = new EventingBasicConsumer(_channel);
+        _connection = connection;
+        _channel = channel;
+
+        var consumer = new EventingBasicConsumer(channel);
         consumer.Received += async (_, ea) =>
         {
             var message = Encoding.UTF8.GetString(ea.Body.ToArray());
@@ -70,22 +73,22 @@ public sealed class RabbitMqConsumer : IDisposable
                 var handled = await onMessage(message);
                 if (handled)
                 {
-                    _channel.BasicAck(ea.DeliveryTag, multiple: false);
+                    channel.BasicAck(ea.DeliveryTag, multiple: false);
                 }
                 else
                 {
                     _logger.LogWarning("메시지 처리 실패(false 반환) - 재큐잉: Queue={Queue}", queueName);
-                    _channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true);
+                    channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true);
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "메시지 처리 중 예외 - 재큐잉: Queue={Queue}", queueName);
-                _channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true);
+                channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true);
             }
         };
 
-        _channel.BasicConsume(queue: queueName, autoAck: false, consumer: consumer);
+        channel.BasicConsume(queue: queueName, autoAck: false, consumer: consumer);
         _logger.LogInformation("RabbitMQ 큐 구독 시작: {Queue}", queueName);
     }
 

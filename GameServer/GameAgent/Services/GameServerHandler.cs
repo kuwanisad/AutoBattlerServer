@@ -3,10 +3,12 @@ using Grpc.Net.Client;
 using IngameServer;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
+using MainServer.Common.Messaging;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Auth;
+using Shared.Common.Messaging;
 using Shared.Common.Redis;
 
 namespace GameAgent.Services;
@@ -39,6 +41,7 @@ public sealed class GameServerHandler
     private readonly MatchServerConnection _matchServerConnection;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ITokenProvider _tokenProvider;
+    private readonly RabbitMqProducer _rabbitMqProducer;
     private readonly ILogger<GameServerHandler> _logger;
     private GameServerInfo? _serverInfo;
 
@@ -78,12 +81,14 @@ public sealed class GameServerHandler
         MatchServerConnection matchServerConnection,
         ISessionRegistry sessionRegistry,
         ITokenProvider tokenProvider,
+        RabbitMqProducer rabbitMqProducer,
         ILogger<GameServerHandler> logger)
     {
         _masterConnection = masterConnection;
         _matchServerConnection = matchServerConnection;
         _sessionRegistry = sessionRegistry;
         _tokenProvider = tokenProvider;
+        _rabbitMqProducer = rabbitMqProducer;
         _logger = logger;
     }
 
@@ -626,12 +631,30 @@ public sealed class GameServerHandler
                 _logger.LogWarning("재접속 유예 시간 초과 - 세션 삭제: {PlayerId} (RoomId={RoomId})",
                     playerId, roomId);
                 await _sessionRegistry.RemoveAsync(playerId);
+                PublishSessionInvalidated(playerId);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "재접속 유예 타이머 처리 실패: {PlayerId}", playerId);
             }
         });
+    }
+
+    /// <summary>
+    /// 세션이 삭제될 때 채팅 서버에 알린다 - LobbyControlService.Logout과 같은 이유/패턴.
+    /// </summary>
+    private void PublishSessionInvalidated(string playerId)
+    {
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(
+                new SessionInvalidatedEvent { PlayerId = playerId });
+            _rabbitMqProducer.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SessionInvalidated 발행 실패: {PlayerId}", playerId);
+        }
     }
 
     private static GameAgentMessage MakeHeartbeat() => new()

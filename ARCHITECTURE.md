@@ -200,18 +200,39 @@ NGO 기반 인게임 서버다.
 ## 보안
 
 ### ConnectionApproval
-클라이언트가 게임 서버(NGO)에 접속할 때 `playerId` 페이로드를 포함한다(예전엔 `matchToken`도 같이 보냈으나 폐지). 게임 에이전트가 Redis에서 세션을 조회해 `Moving` 상태와 `OwnerServerId` 소유권 이전 여부(`TryClaimOwnershipAsync`)를 검증한다. 검증 실패 시 접속을 거부한다.
+클라이언트가 게임 서버(NGO)에 접속할 때 `"{playerId}|{token}"` 페이로드를 포함한다. 게임 에이전트가 Redis에서 세션을 조회해 `Moving` 상태, `OwnerServerId` 소유권 이전 여부(`TryClaimOwnershipAsync`), 토큰 유효성(`TokenVerification.IsValid`)을 모두 검증한다. 승인 시 새 토큰을 발급/회전하고 `CustomMessagingManager`의 `"TokenUpdate"` 메시지로 클라에 전달한다. 검증 실패 시 접속을 거부한다. → 자세한 경위는 [`KNOWN_ISSUES.md` #3](./KNOWN_ISSUES.md#3-connection-approval로비인게임에-토큰-검증이-아예-없었음) 참고.
 
 ### Moving 상태
 서버 이동 중인 플레이어는 Redis에 `Moving` 상태로 기록된다. 해커가 타인인 척 다른 서버에 접속하려 해도 Redis의 `OwnerServerId` 원자적 검증으로 차단된다 (예전엔 `NextServer` + 일회용 `MatchToken` 조합이었으나, 매칭 서버가 게임 에이전트에 플레이어 명단을 직접 전달하는 구조로 바뀌면서 토큰이 불필요해졌다).
 
-### JWT (클라이언트 ↔ 로비 서버)
-로비 서버와의 통신은 토큰으로 인증한다. `AuthInterceptor`가 모든 gRPC 요청에서 토큰을 자동 검증한다. `Login`/`CreateAccount`는 코드에서 제거됐다(별도 "로그인 서버"로 분리하는 게 맞는 방향이지만 나중 작업 - 지금은 `EnterLobby`부터 토큰이 필요한 임시 상태). 클라는 최초 접속 시 스스로 만든(사실상 playerId 그대로인) 토큰을 제출하고, `EnterLobby`가 성공하면 그 자리에서 `ITokenProvider.GenerateToken`으로 새 토큰을 발급해 돌려준다. `DummyTokenProvider`는 지금 어떤 문자열이든 그대로 playerId로 취급해 통과시키므로 실질적인 신원 검증이 없는 상태 - 로그인 서버가 생기기 전까지의 임시 조치.
+### 토큰 (클라이언트 ↔ 로비/인게임 서버)
+로비/인게임 서버와의 통신은 토큰으로 인증한다. `AuthInterceptor`(로비)/`GameServerHandler`(게임 에이전트)가 검증한다. `Login`/`CreateAccount`는 코드에서 제거됐고, 대신 로그인 서버(`LoginServer`)가 클라 최초 진입을 전담한다 - 계정 검증/생성(`AccountServer` 경유) 후 초기 토큰을 발급해 로비로 이관한다.
 
-세션 레지스트리(`PlayerSession`)에 `CurrentToken`/`PreviousToken` 2슬롯과 `TokenIssuedAtUnixMs`(TTL 판단용)를 둔다. 갱신 권한은 `OwnerServerId`를 가진 서버만 갖는다 - 즉 지금 그 플레이어를 관리 중인 서버만 토큰을 새로 발급할 수 있다. 검증 지점은 이동 방향에 따라 다르다: **로비→인게임**은 게임 에이전트의 `ConnectionApproval`이 검증하고(서버 간 소통을 게임 에이전트가 대신하므로), **인게임→로비**는 로비의 `EnterLobby`가 검증한다. 실제 "제출된 토큰을 세션의 2슬롯과 대조해서 거부"하는 로직 자체는 아직 미구현(TODO) - 지금은 `EnterLobby`가 무조건 새로 발급하고, `ConnectionApproval`은 `OwnerServerId`만 보고 토큰은 안 본다.
+토큰은 `"{무작위값}:{playerId}"` 형식(`DummyTokenProvider`) - 서명은 없지만(진짜 JWT 라이브러리로 교체될 자리) 매 발급마다 값이 달라져서 2슬롯 대조가 실질적 효과를 갖는다. → 경위는 [`KNOWN_ISSUES.md` #2](./KNOWN_ISSUES.md#2-토큰이-playerid-그-자체라서-2슬롯-검증이-무의미했음) 참고.
+
+세션 레지스트리(`PlayerSession`)에 `CurrentToken`/`PreviousToken` 2슬롯과 `TokenIssuedAtUnixMs`(TTL 판단용)를 둔다. 갱신 권한은 `OwnerServerId`를 가진 서버만 갖는다. 검증 지점은 이동 방향에 따라 다르다: **로비→인게임**은 게임 에이전트의 `ConnectionApproval`이, **인게임→로비**는 로비의 `EnterLobby`가 검증한다(둘 다 `TokenVerification.IsValid` 공용 함수 재사용). 채팅 서버는 이 회전에 관여하지 않는다 - 핸드셰이크 시점에 읽기 전용으로만 검증하고, 재연결 때마다 새로 검증할 뿐 자체적으로 토큰을 회전시키지 않는다("서비스 제공 가능 여부는 전적으로 메인 서버한테 맡긴다"는 원칙). → 경위는 [`KNOWN_ISSUES.md` #10](./KNOWN_ISSUES.md#10-websockethandler에-인증이-아예-없었음구버전-유산) 참고.
+
+세션 자체엔 TTL이 없다(영구) - 개별 세션 생존 여부는 소유 서버의 `server:{serverId}` TTL로만 판단한다. → 경위는 [`KNOWN_ISSUES.md` #5](./KNOWN_ISSUES.md#5-세션-ttl24시간의-실제-역할을-서로-다르게-이해하고-있었음--결국-완전-제거) 참고.
 
 ### 서버 간 인증 (메인 서버 ↔ 마스터 서버)
 `IServerAuthenticator` 퍼사드로 마스터 서버에 접속하는 서버를 검증한다. 지금은 `DummyServerAuthenticator`(항상 통과)이고, 나중에 mTLS를 도입할 때 여러 검증 수단을 조합하는 `CompositeServerAuthenticator`로 교체할 수 있게 인터페이스를 미리 분리해뒀다. `ConnectionHandler`가 접속 시작 시 가장 먼저 이 검증을 거치고, 실패하면 `Unauthenticated`로 즉시 연결을 끊는다.
 
+### 클라가 로비에 있는 동안의 생존 감지 - `StayConnected`
+로비는 클라와 지속 연결이 없어서(단항 RPC만 오감), 클라가 조용히 사라져도 감지할 방법이 예전엔 없었다. `StayConnected` 스트림을 EnterLobby 직후 열어서, 그 연결이 살아있다는 사실 자체로 생존을 판단한다. 매치 확정으로 정상 이동 중인 경우와 구분하기 위해 `OwnerServerId`+`Status`를 함께 확인한다. → 경위는 [`KNOWN_ISSUES.md` #4](./KNOWN_ISSUES.md#4-로비에-조용히-앉아있는-클라의-끊김을-감지할-방법이-없었음), [#6](./KNOWN_ISSUES.md#6-stayconnected-스트림-끊김과-매치-확정이-겹치는-race) 참고.
+
+### 세션 무효화 전파 - `SessionInvalidated`
+로비/게임 에이전트가 세션을 지우는 모든 지점(로그아웃, `StayConnected` 끊김, 재접속 유예 타임아웃)에서 RabbitMQ로 `SessionInvalidated{playerId}`를 발행한다. 채팅 서버가 구독해서, 이미 무효화된 세션의 웹소켓 연결을 강제 종료한다 - 채팅 서버는 이 신호로만 판단하고 스스로 세션 유효성을 재판단하지 않는다. → 경위는 [`KNOWN_ISSUES.md` #7](./KNOWN_ISSUES.md#7-sessioninvalidated-발행-소비-사이의-지연으로-생기는-race) 참고.
+
+### 친구 삭제 → 채팅방 정리 - 아웃박스 패턴
+`AccountServer.RemoveFriend`는 친구 목록 갱신과 "이벤트 발행 예정" 기록을 원자적으로 같이 남기고, 별도 백그라운드 서비스가 그 기록을 RabbitMQ로 실제 발행(성공해야 기록 삭제)한다. `ChatServer`는 수동 ack(처리 끝나야 ack, 실패 시 재큐잉)로 소비한다 - 둘이 합쳐 "최소 한 번은 처리된다"를 보장한다. → 경위는 [`KNOWN_ISSUES.md` #11](./KNOWN_ISSUES.md#11-accountserver가-rabbitmq-발행-중-죽으면-이벤트가-유실될-수-있는-문제-이중-쓰기-문제), [#12](./KNOWN_ISSUES.md#12-rabbitmqconsumer를-싱글톤으로-등록했더니-여러-구독이-서로의-채널을-덮어씀) 참고.
+
+### 채팅 메시지 신뢰 판단 - 타입으로 구분, 필드 값으로 안 함
+`ChatMessageDelivery`(친구가 보낸 실제 메시지)와 `SystemChatDelivery`(채팅 서버가 직접 보내는 안내)는 완전히 다른 `oneof` 케이스다. "특정 필드가 비어있으면 신뢰할 메시지"같은 규약은 안 쓴다 - 클라가 정상 경로로 만들어낼 수 없는 타입이라는 사실 자체가 신뢰의 근거여야 한다. → 경위는 [`KNOWN_ISSUES.md` #9](./KNOWN_ISSUES.md#9-sender_id를-빈-값으로-시스템-메시지-특수-취급하려다-발견한-스푸핑-위험) 참고.
+
 ### ⚠ 알려진 경합 - 클라 자진 이탈 vs 서버 강제 종료 (게임 종료 후 로비 복귀)
 게임 종료/방 취소 시, 인게임 서버는 클라에게 `CloseRoom`(리다이렉트 주소 포함)을 명시적 메시지로 보내고, 클라의 확인 응답을 기다린다. **클라는 확인 응답을 보낸 즉시(서버의 처리를 기다리지 않고) 스스로 NGO 연결을 끊고 새 로비로 이동을 시작**하고, **서버도 독립적으로(확인 응답을 받으면 곧장, 못 받으면 최대 5초 뒤) 자기 쪽에서 `DisconnectClient`를 호출**한다. 두 경로가 서로의 타이밍을 기다리지 않으므로, 아주 짧은 순간 "클라는 이미 끊었는데 서버는 아직 모르고 뒤늦게 `DisconnectClient`를 호출하려 하는" 경합이 생길 수 있다. 인게임 서버 쪽 `IngameServerInstance._clients`(`ConcurrentDictionary`)가 이 경합을 원자적으로 처리한다 - 서버가 끊으려는 시점에 그 클라가 이미 `_clients`에서 빠져있으면(클라가 먼저 끊어서 `OnClientDisconnected`가 이미 처리했으면) 그 시도를 무효로 돌린다. 실질적 위험(중복 처리, 잘못된 상태)은 없지만, 설계상 의도적으로 감수한 경합이라 기록해둔다.
+
+### ⚠ 알려진 경합 - 친구 삭제 vs 메시지 전송
+메시지 전송 시 방 권한을 확인하는 시점과 실제 전달/저장 시점 사이에 아주 짧은 틈이 있어, 그 틈에 친구가 삭제되면 메시지 한 통이 새어 들어올 수 있다. 서버는 별도 락을 안 걸고, 클라(`WebSocketChatChannel`)가 `RoomRemoved` 통보 이후의 메시지를 조용히 버리는 "차단 목록" 방식으로 창을 좁힌다. → 경위는 [`KNOWN_ISSUES.md` #8](./KNOWN_ISSUES.md#8-메시지-전송-권한-확인과-실제-전달저장-사이의-race-친구-삭제와-메시지-전송이-겹침) 참고.
+
+전체 발견-원인-피해-해결-결과 상세 기록은 [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md) 참고.

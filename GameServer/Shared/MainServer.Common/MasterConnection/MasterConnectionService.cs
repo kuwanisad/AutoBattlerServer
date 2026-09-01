@@ -27,6 +27,16 @@ public sealed class MasterConnectionService : BackgroundService
     /// <summary>마스터 서버로부터 받은 계정 서버(AccountServer) 주소. 실제로는 로그인 서버만 씀.</summary>
     public string AccountServerAddress { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// 마스터 서버로부터 받은 세션 레지스트리(Redis) 원본 주소. ISessionRegistry를 쓰는
+    /// 코드는 이걸 직접 몰라도 되지만(SessionRegistryConnector가 알아서 연결), 세션
+    /// 레지스트리와 완전히 별개의 용도(예: 채팅 서버의 방/메시지 저장)로 자기만의 Redis
+    /// 연결을 새로 열어야 하는 경우를 위해 노출해둔다 - "채팅방을 세션 레지스트리에
+    /// 등록하면 안 된다"는 원칙에 따라 ISessionRegistry API 자체는 절대 안 거치지만,
+    /// 같은 물리적 Redis 서버를 다른 키스페이스로 쓰는 건 무방하다.
+    /// </summary>
+    public string RedisAddress { get; private set; } = string.Empty;
+
     /// <summary>이 서버 인스턴스의 고유 ID.</summary>
     public string InstanceId => _options.InstanceId;
 
@@ -259,6 +269,7 @@ public sealed class MasterConnectionService : BackgroundService
                     case MasterMessage.PayloadOneofCase.SessionRegistry:
                         // 로비/게임 에이전트/채팅/매칭 서버 전부 세션 레지스트리(Redis)가 필요하므로
                         // 서버 타입 구분 없이 받는 즉시 연결을 요청한다.
+                        RedisAddress = message.SessionRegistry.Address;
                         _ = ConnectSessionRegistryAsync(message.SessionRegistry.Address, stoppingToken);
                         break;
 

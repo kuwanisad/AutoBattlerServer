@@ -11,6 +11,7 @@
 		<PackageReference Include="Google.Protobuf" Version="3.27.2" />
 		<PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
 		<PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+		<ProjectReference Include="..\Shared\AccountServer.Contracts\AccountServer.Contracts.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -24,6 +25,10 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Link>shared.appsettings.json</Link>
 		</Content>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Folder Include="Services\" />
 	</ItemGroup>
 
 </Project>

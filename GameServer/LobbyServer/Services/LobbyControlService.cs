@@ -3,10 +3,12 @@ using Grpc.Net.Client;
 using LobbyServer.Auth;
 using LobbyServer;
 using MainServer.Common.MasterConnection;
+using MainServer.Common.Messaging;
 using MatchingServer;
 using Microsoft.Extensions.Logging;
 using Shared.Common;
 using Shared.Common.Auth;
+using Shared.Common.Messaging;
 using Shared.Common.Redis;
 
 namespace LobbyServer.Services;
@@ -29,6 +31,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     private readonly IRateLimiter _rateLimiter;
     private readonly MasterConnectionService _masterConnection;
     private readonly MatchNotificationDispatcher _notificationDispatcher;
+    private readonly RabbitMqProducer _rabbitMqProducer;
     private readonly ILogger<LobbyControlService> _logger;
 
     public LobbyControlService(
@@ -37,6 +40,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         IRateLimiter rateLimiter,
         MasterConnectionService masterConnection,
         MatchNotificationDispatcher notificationDispatcher,
+        RabbitMqProducer rabbitMqProducer,
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
@@ -44,6 +48,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         _rateLimiter = rateLimiter;
         _masterConnection = masterConnection;
         _notificationDispatcher = notificationDispatcher;
+        _rabbitMqProducer = rabbitMqProducer;
         _logger = logger;
     }
 
@@ -53,9 +58,31 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         _logger.LogInformation("로그아웃: {PlayerId}", playerId);
 
         if (!string.IsNullOrEmpty(playerId))
+        {
             await _sessionRegistry.RemoveAsync(playerId);
+            PublishSessionInvalidated(playerId);
+        }
 
         return new LogoutResponse { Success = true };
+    }
+
+    /// <summary>
+    /// 세션이 삭제될 때 채팅 서버에 알린다 - "서비스 제공 가능 여부는 전적으로 메인
+    /// 서버한테 맡긴다"는 원칙에 따라, 채팅 서버는 이 신호로만 연결 종료를 판단한다.
+    /// 발행 실패는 로그만 남기고 삼킨다 - 세션 삭제 자체(이미 끝남)를 막을 이유는 아니다.
+    /// </summary>
+    private void PublishSessionInvalidated(string playerId)
+    {
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(
+                new SessionInvalidatedEvent { PlayerId = playerId });
+            _rabbitMqProducer.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SessionInvalidated 발행 실패: {PlayerId}", playerId);
+        }
     }
 
     /// <summary>
@@ -131,6 +158,61 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             HasConflictingSession = true,
             ConflictingServerAddress = result.PreviousOwner?.Address ?? string.Empty,
         };
+    }
+
+    /// <summary>
+    /// EnterLobby 성공 직후 클라가 연다. 내용은 안 주고받고, 이 스트림이 살아있다는
+    /// 사실 자체가 "클라가 아직 로비에 있다"는 증거다. 클라가 끊거나(와이파이 등) 서버가
+    /// 종료될 때까지 그냥 대기만 한다.
+    /// </summary>
+    public override async Task StayConnected(
+        StayConnectedRequest request,
+        IServerStreamWriter<StayConnectedEvent> responseStream,
+        ServerCallContext context)
+    {
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId)) return;
+
+        try
+        {
+            await Task.Delay(Timeout.Infinite, context.CancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // 정상 - 스트림 종료(클라 이탈 또는 서버 종료)
+        }
+        finally
+        {
+            await HandleStayConnectedEndedAsync(playerId);
+        }
+    }
+
+    /// <summary>
+    /// StayConnected 스트림이 끊겼을 때, 그게 "진짜 조용히 사라진 것"인지 "정상적으로
+    /// 다른 서버로 이동 중이라 끊긴 것"인지 구분한다. 매치 확정 시 MatchNotificationDispatcher가
+    /// 클라에게 MatchFound를 보내기 전에 이미 OwnerServerId/Status를 갱신해두므로, 정상
+    /// 이동이면 여기 도달했을 때 이미 "내 소유가 아니거나 Status가 Moving"인 상태다 -
+    /// 그 좁은 race(처리 도중 우연히 끊기는 경우)까지 방어하려고 Status도 같이 확인한다.
+    /// </summary>
+    private async Task HandleStayConnectedEndedAsync(string playerId)
+    {
+        try
+        {
+            var session = await _sessionRegistry.GetAsync(playerId);
+
+            if (session != null &&
+                session.OwnerServerId == _masterConnection.InstanceId &&
+                session.Status == PlayerStatus.Lobby)
+            {
+                await _sessionRegistry.RemoveAsync(playerId);
+                PublishSessionInvalidated(playerId);
+                _logger.LogInformation("StayConnected 스트림 종료 - 세션 정리: {PlayerId}", playerId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "StayConnected 종료 처리 실패: {PlayerId}", playerId);
+        }
     }
 
     public override async Task RequestMatch(
@@ -253,5 +335,128 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         }
 
         return new CancelMatchResponse { Success = true };
+    }
+
+    // === 친구 관리 (계정 서버 대리 호출) ===
+    // 채팅 서버는 이 창구를 거치지 않는다 - "서비스 제공 가능 여부는 전적으로 메인
+    // 서버한테 맡긴다"는 원칙에 따라, 친구 관계 판단은 항상 여기(또는 나중에 인게임
+    // 서버의 같은 창구)를 거친다.
+
+    public override async Task<GetFriendsResponse> GetFriends(GetFriendsRequest request, ServerCallContext context)
+    {
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId)) return new GetFriendsResponse();
+
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            _logger.LogWarning("계정 서버 주소 없음 - GetFriends 실패: {PlayerId}", playerId);
+            return new GetFriendsResponse();
+        }
+
+        try
+        {
+            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+            var client = new AccountServer.AccountControl.AccountControlClient(channel);
+            var response = await client.GetFriendsAsync(new AccountServer.GetFriendsRequest { PlayerId = playerId });
+
+            var result = new GetFriendsResponse();
+            result.FriendPlayerIds.AddRange(response.FriendPlayerIds);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetFriends 요청 실패: {PlayerId}", playerId);
+            return new GetFriendsResponse();
+        }
+    }
+
+    public override async Task<AddFriendResponse> AddFriend(AddFriendRequest request, ServerCallContext context)
+    {
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId))
+        {
+            return new AddFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+        }
+
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            return new AddFriendResponse { Success = false, ErrorMessage = "계정 서버 연결 안 됨" };
+        }
+
+        try
+        {
+            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+            var client = new AccountServer.AccountControl.AccountControlClient(channel);
+            var response = await client.AddFriendAsync(new AccountServer.AddFriendRequest
+            {
+                PlayerId = playerId,
+                FriendPlayerId = request.FriendPlayerId,
+            });
+
+            return new AddFriendResponse { Success = response.Success, ErrorMessage = response.ErrorMessage };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AddFriend 요청 실패: {PlayerId}", playerId);
+            return new AddFriendResponse { Success = false, ErrorMessage = "일시적인 오류입니다." };
+        }
+    }
+
+    public override async Task<RemoveFriendResponse> RemoveFriend(RemoveFriendRequest request, ServerCallContext context)
+    {
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId))
+        {
+            return new RemoveFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+        }
+
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            return new RemoveFriendResponse { Success = false, ErrorMessage = "계정 서버 연결 안 됨" };
+        }
+
+        try
+        {
+            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+            var client = new AccountServer.AccountControl.AccountControlClient(channel);
+            var response = await client.RemoveFriendAsync(new AccountServer.RemoveFriendRequest
+            {
+                PlayerId = playerId,
+                FriendPlayerId = request.FriendPlayerId,
+            });
+
+            // 채팅 서버 통보는 AccountServer가 트랜잭션 아웃박스로 직접 처리한다
+            // (FriendEventOutbox → RabbitMQ → ChatServer.FriendRemovedSubscriber) -
+            // 로비는 여기서 그 흐름에 관여하지 않는다.
+            return new RemoveFriendResponse { Success = response.Success, ErrorMessage = response.ErrorMessage };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RemoveFriend 요청 실패: {PlayerId}", playerId);
+            return new RemoveFriendResponse { Success = false, ErrorMessage = "일시적인 오류입니다." };
+        }
+    }
+
+    /// <summary>
+    /// AccountServer 호출 시 SocketsHttpHandler를 명시적으로 구성한다 - 예전에 이걸
+    /// 생략한 bare GrpcChannel.ForAddress로 AccountServer를 호출했을 때 원인 불명의
+    /// "HTTP_1_1_REQUIRED" 오류가 재현된 적이 있어서(LoginConnectionHandler에서 발견),
+    /// 검증된 이 패턴을 그대로 재사용한다.
+    /// </summary>
+    private static GrpcChannel CreateAccountServerChannel(string address)
+    {
+        var handler = new System.Net.Http.SocketsHttpHandler
+        {
+            EnableMultipleHttp2Connections = true,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(10),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
+            KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests,
+        };
+
+        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
+        {
+            HttpHandler = handler,
+            DisposeHttpClient = true,
+        });
     }
 }

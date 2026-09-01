@@ -34,14 +34,22 @@ builder.Services.AddMainServerMessaging(builder.Configuration);
 // (수동 ack - 처리가 확실히 끝나야만 ack, 실패하면 재큐잉).
 builder.Services.AddHostedService<FriendRemovedSubscriber>();
 
-// Redis
+// 지금 접속 중인 클라 추적 (강제 종료 대상 찾기용) + 메인 서버가 세션을 지울 때
+// 채팅 연결도 강제 종료 (SessionInvalidated 구독). "서비스 제공 가능 여부는 전적으로
+// 메인 서버한테 맡긴다"는 원칙 - 채팅 서버가 스스로 판단하지 않는다.
+builder.Services.AddSingleton<ChatConnectionRegistry>();
+builder.Services.AddHostedService<SessionInvalidatedSubscriber>();
+
+// Redis - 세션 레지스트리(토큰 검증 읽기 전용)
 builder.Services.AddSessionRegistry();
 builder.Services.AddHostedService<ServerHeartbeatService>();
 
-// 채팅 서버 핵심 서비스
-builder.Services.AddSingleton<IChatMessageStore, InMemoryChatMessageStore>();
+// 채팅 서버 핵심 서비스 - 채팅방/메시지 저장소는 세션 레지스트리와 완전히 별개인
+// 채팅 서버 전용 Redis 연결(ChatRedisConnection)을 쓴다.
+builder.Services.AddSingleton<ChatRedisConnection>();
+builder.Services.AddSingleton<IChatRoomStore, RedisChatRoomStore>();
+builder.Services.AddSingleton<IChatMessageStore, RedisChatMessageStore>();
 builder.Services.AddSingleton<IChatFilter, DummyChatFilter>();
-builder.Services.AddSingleton<ChatChannelManager>();
 builder.Services.AddSingleton<WebSocketHandler>();
 
 // gRPC (마스터 서버와 통신)

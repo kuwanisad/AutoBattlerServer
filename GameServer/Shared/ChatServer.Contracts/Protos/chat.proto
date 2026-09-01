@@ -66,6 +66,9 @@ message ClientChatMessage {
     JoinChannelRequest join = 1;    // 채널 입장
     LeaveChannelRequest leave = 2;  // 채널 퇴장
     SendMessageRequest send = 3;    // 메시지 전송
+    RequestChatRequest request_chat = 4;  // 친구와 대화 시작 (방이 없으면 생성)
+    GetMyRoomsRequest get_my_rooms = 5;   // 내 방 목록 조회
+    GetHistoryRequest get_history = 6;    // 방의 과거 메시지 조회 (페이지네이션)
   }
 }
 
@@ -77,27 +80,91 @@ message LeaveChannelRequest {
   string channel_id = 1;
 }
 
+// [설계 결정 - 취향 영역, 정답은 아님] Send는 방을 자동 생성하지 않는다 - 존재하는(=RequestChat으로
+// 이미 만들어진) 방에만 보낼 수 있고, 없으면 NOT_A_MEMBER로 거부된다. "대화 요청(방 생성)"과
+// "메시지 전송"을 의도적으로 분리된 두 단계로 뒀다 - 만약 Send가 없는 채널로 오면 알아서
+// 만들어버리는 방식으로 갔다면, 친구 검증 로직이 RequestChat과 Send 두 곳에 중복되거나,
+// Send 쪽만 검증을 빼먹는 실수가 나기 쉬웠을 것. 다른 방향(자동 생성)을 원하면 여기부터 바꿀 것.
 message SendMessageRequest {
   string channel_id = 1;
   string content = 2;
 }
 
+// "관리"(조회/추가/삭제)가 아니라 클라가 이미 붙어있는 채팅 서버에 직접 요청하는 것 -
+// 로비 서버를 거치지 않는다. 채팅 서버가 내부적으로(읽기 전용) AccountServer.GetFriends를
+// 불러 진짜 친구 사이인지 확인한다.
+message RequestChatRequest {
+  string friend_player_id = 1;
+}
+
+message GetMyRoomsRequest {}
+
+message GetHistoryRequest {
+  string channel_id = 1;
+  int64 before_timestamp_unix_ms = 2;  // 0이면 "가장 최근부터"
+  int32 count = 3;
+}
+
 // 채팅 서버 → 클라이언트
 message ServerChatMessage {
   oneof payload {
-    ChatMessageDelivery message = 1;  // 수신된 채팅 메시지
+    ChatMessageDelivery message = 1;  // 수신된 채팅 메시지 (항상 친구가 보낸 것 - sender_id는
+                                       // 절대 특수 취급 없이 항상 실제 playerId다)
     JoinChannelAck join_ack = 2;      // 채널 입장 확인
     LeaveChannelAck leave_ack = 3;    // 채널 퇴장 확인
     ChatError error = 4;              // 에러 응답
+    RequestChatAck request_chat_ack = 5;  // RequestChat 결과
+    MyRoomsResponse my_rooms = 6;         // GetMyRooms 결과
+    HistoryResponse history = 7;          // GetHistory 결과
+    RoomInvited room_invited = 8;         // 상대가 나와 대화를 시작함 (실시간 알림, 온라인일 때만)
+    RoomRemoved room_removed = 9;         // 친구 삭제로 방이 무효화됨
+    SystemChatDelivery system_message = 10;  // 채팅 서버가 직접 보내는 안내 - Message와
+                                              // 완전히 다른 타입이라 "누가 보낸 신뢰할 메시지인지"를
+                                              // 필드 값(예: 빈 sender_id)으로 암묵적으로 판단할 필요가
+                                              // 없다. 이 타입으로 왔다는 사실 자체가 신뢰의 근거다 -
+                                              // 클라가 조작할 수 없는 서버 쪽 oneof 선택이므로.
   }
 }
 
 message ChatMessageDelivery {
   string message_id = 1;
   string channel_id = 2;
-  string sender_id = 3;
+  string sender_id = 3;   // 항상 실제 playerId - 특수 취급/예약값 없음. "이게 신뢰할
+                           // 메시지인가"는 이 필드가 아니라 ServerChatMessage.oneof의
+                           // 어느 케이스로 왔는지(Message vs SystemChatDelivery)로 판단한다.
   string content = 4;
   int64 timestamp_unix_ms = 5;
+}
+
+// 채팅 서버가 특정 클라이언트에게 직접 보내는 안내 - 친구가 보낸 게 아니다. Message와
+// 완전히 다른 oneof 케이스이므로, "이게 진짜 서버가 보낸 게 맞나"를 클라가 필드 값으로
+// 추론할 필요가 없다 - 이 타입으로 왔다는 사실 자체가 서버만 만들 수 있는 증거다(클라는
+// 자신이 보내는 SendMessageRequest로 이 타입을 생성할 방법이 없음).
+//
+// 내부에 다시 oneof를 둬서 "특정 대화방에 종속된 안내"와 "방과 무관한 전역 안내"를
+// 구조적으로 나눈다 - enum 플래그 + "경우에 따라 비어있을 수 있는 필드" 조합보다,
+// 아예 그 방 개념이 없는 쪽은 channel_id 필드 자체가 존재하지 않게 타입으로 강제하는
+// 게 더 안전하다.
+message SystemChatDelivery {
+  string message_id = 1;
+  int64 timestamp_unix_ms = 2;
+
+  oneof payload {
+    ChatNotice chat_notice = 3;      // 특정 대화방 안에 자연스럽게 끼워 넣는 안내
+                                      // (예: "이 방에는 5초에 한 번만 보낼 수 있습니다")
+    GlobalNotice global_notice = 4;  // 유저가 로비/인게임 어디에 있든, 어느 대화방과도
+                                      // 무관하게 항상 떠야 하는 안내 (예: "채팅이
+                                      // 금지되었습니다")
+  }
+}
+
+message ChatNotice {
+  string channel_id = 1;
+  string content = 2;
+}
+
+message GlobalNotice {
+  string content = 1;
 }
 
 message JoinChannelAck {
@@ -113,4 +180,34 @@ message LeaveChannelAck {
 message ChatError {
   string code = 1;
   string message = 2;
+}
+
+message RequestChatAck {
+  bool success = 1;
+  string channel_id = 2;
+  string error_message = 3;
+}
+
+message MyRoomsResponse {
+  repeated ChatRoomInfo rooms = 1;
+}
+
+// 1:1 방이라 상대방 playerId 하나만 있으면 충분하다.
+message ChatRoomInfo {
+  string channel_id = 1;
+  string friend_player_id = 2;
+}
+
+message HistoryResponse {
+  string channel_id = 1;
+  repeated ChatMessageDelivery messages = 2;
+}
+
+message RoomInvited {
+  string channel_id = 1;
+  string friend_player_id = 2;
+}
+
+message RoomRemoved {
+  string channel_id = 1;
 }

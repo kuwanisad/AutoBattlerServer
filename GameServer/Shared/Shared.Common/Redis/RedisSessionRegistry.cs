@@ -22,7 +22,15 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
     private const string SessionKeyPrefix = "session:";
     private const string ServerKeyPrefix = "server:";
 
-    private static readonly TimeSpan DefaultTtl = TimeSpan.FromHours(24);
+    // session:{playerId}는 이제 TTL이 없다(영구) - 개별 세션 생존 여부는 소유 서버의
+    // server:{serverId} TTL로만 판단한다(TryClaimOwnershipScript). 이전엔 세션 자체에도
+    // 24시간 TTL을 뒀었는데, 그건 "정상 정리 실패 시 최후 안전망"이라는 명분이었지만
+    // 실제로는 아무 능동적 효과가 없었다(Redis의 수동적 키 만료는 이 코드에 어떤 신호도
+    // 안 주므로 - 구독하지 않는 한). 서버가 죽으면 서버 TTL이 그 서버가 물고 있던 모든
+    // 세션을 자동으로 이전 가능 상태로 만들어주므로 별도 세션 TTL이 불필요해졌다.
+    // (남는 좁은 경우: 서버가 죽은 뒤 그 플레이어가 다시는 안 돌아오면 그 세션이
+    // TryClaimOwnershipAsync가 다시 호출될 때까지 무기한 남는다 - 재접속 자체가 없으면
+    // 그 재판단 계기도 없기 때문. 실질적 영향은 미미하다고 보고 감수하기로 함.)
 
     // session:{playerId}의 OwnerServerId를 확인해 권한 이전 여부를 원자적으로 판단하는 Lua 스크립트.
     // - 세션이 아예 없으면(최초 등록) 무조건 승인.
@@ -36,12 +44,11 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         local sessionKey = KEYS[1]
         local newServerId = ARGV[1]
         local serializedSession = ARGV[2]
-        local ttl = tonumber(ARGV[3])
 
         local existingJson = redis.call('GET', sessionKey)
 
         if not existingJson then
-            redis.call('SET', sessionKey, serializedSession, 'EX', ttl)
+            redis.call('SET', sessionKey, serializedSession)
             return {1, ''}
         end
 
@@ -49,7 +56,7 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         if not currentOwner then currentOwner = '' end
 
         if currentOwner == '' or currentOwner == newServerId then
-            redis.call('SET', sessionKey, serializedSession, 'EX', ttl)
+            redis.call('SET', sessionKey, serializedSession)
             return {1, currentOwner}
         end
 
@@ -58,7 +65,7 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
 
         -- TTL=-2: 키 없음(서버 죽음) → 권한 이전 승인
         if serverTtl == -2 then
-            redis.call('SET', sessionKey, serializedSession, 'EX', ttl)
+            redis.call('SET', sessionKey, serializedSession)
             return {1, currentOwner}
         end
 
@@ -98,7 +105,7 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         var key = SessionKeyPrefix + playerId;
 
         var value = _serializer.Serialize(session);
-        await _db.StringSetAsync(key, value, DefaultTtl);
+        await _db.StringSetAsync(key, value); // TTL 없음 - 위 설명 참고
 
         _logger.LogInformation("세션 업데이트: {PlayerId} → {Status} @ {Server}",
             playerId, session.Status, session.CurrentServer);
@@ -183,11 +190,9 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         newSession.UpdatedAtUnixMs = TimeUtils.CurrentTimestamp();
         var serializedSession = _serializer.Serialize(newSession);
 
-        var ttlSeconds = (long)DefaultTtl.TotalSeconds;
-
         var rawResult = await _db.ScriptEvaluateAsync(TryClaimOwnershipScript,
             keys: new RedisKey[] { sessionKey },
-            values: new RedisValue[] { serverId, serializedSession, ttlSeconds });
+            values: new RedisValue[] { serverId, serializedSession });
 
         var result = (RedisResult[])rawResult!;
         var claimed = (int)result[0] == 1;
