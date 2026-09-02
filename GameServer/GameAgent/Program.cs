@@ -1,5 +1,6 @@
 using GameAgent.Services;
 using MainServer.Common.Heartbeat;
+using Shared.Common.Hosting;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
@@ -13,13 +14,8 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.WebHost.ConfigureKestrel(options =>
-{
-    // 게임 서버(Unity)가 gRPC로 접속하는 포트
-    options.ListenAnyIP(7000, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
-    // REST 테스트용 포트
-    options.ListenAnyIP(7001, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
-});
+// 게임 서버(Unity)가 gRPC로 접속하는 포트(7000) + REST 테스트용 포트(7001)
+builder.ConfigureGameServerEndpoints(grpcPort: 7000, httpPort: 7001);
 
 builder.Services.AddGrpc();
 

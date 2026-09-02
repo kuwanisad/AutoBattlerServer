@@ -2,9 +2,11 @@ using AccountServer;
 using AccountServer.Debug;
 using AccountServer.Services;
 using MainServer.Common.Heartbeat;
+using Shared.Common.Hosting;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Auth;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,11 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.WebHost.ConfigureKestrel(options =>
-{
-    options.ListenAnyIP(5500, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
-    options.ListenAnyIP(5501, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
-});
+builder.ConfigureGameServerEndpoints(grpcPort: 5500, httpPort: 5501);
 
 builder.Services.Configure<MasterConnectionOptions>(
     builder.Configuration.GetSection(MasterConnectionOptions.SectionName));
@@ -31,6 +29,9 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 
 // 계정 저장소 - 지금은 인메모리 더미. 진짜 SQL 서버가 생기면 이 등록만 교체.
 builder.Services.AddSingleton<IAccountRepository, InMemoryAccountRepository>();
+
+// 비밀번호는 절대 원문으로 저장 안 함 - PBKDF2 해시만 저장.
+builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 
 // 친구 삭제 이벤트를 채팅 서버에 알리기 위한 아웃박스(트랜잭션 아웃박스 패턴) + RabbitMQ.
 builder.Services.AddMainServerMessaging(builder.Configuration);

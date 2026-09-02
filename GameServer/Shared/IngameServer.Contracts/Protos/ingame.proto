@@ -31,6 +31,7 @@ message GameServerMessage {
     PlayerLeft player_left = 7;                     // 플레이어 퇴장
     ApprovalRequest approval_request = 8;           // ConnectionApproval 검증 요청
     RoomTimeout room_timeout = 9;                   // 방-채움 타임아웃 - 자체 감지한 결원 보고
+    FriendCommandRequest friend_command = 10;       // 인게임 중 친구 관리 명령어 릴레이
   }
 }
 
@@ -98,6 +99,35 @@ message ApprovalRequest {
                              // 대조해서 진짜 본인인지 검증하는 데 쓴다 (TokenVerification 참고)
 }
 
+// 인게임 중 클라가 친구 관리(조회/추가/삭제)를 명령어로 요청하면, 인게임 서버가 이걸로
+// 릴레이한다. 로비의 GetFriends/AddFriend/RemoveFriend와 같은 역할이지만 클라가 인게임에
+// 붙어있는 동안 요청하는 경로 - "친구 관리는 지금 클라를 상대하는 메인 서버의 창구"
+// 원칙에 따라 인게임 서버는 판단 없이 릴레이만 하고, 실제 처리는 게임 에이전트가
+// AccountServer를 호출해서 담당한다.
+//
+// player_id는 클라가 자체 신고한 값을 신뢰하지 않는다 - 인게임 서버가 ConnectionApproval
+// 때 이미 검증해둔 값으로 덮어써서 여기 채운다(클라 쪽 CustomMessagingManager 페이로드에는
+// player_id 필드 자체가 없다 - KNOWN_ISSUES.md #9와 같은 이유).
+message FriendCommandRequest {
+  uint64 client_id = 1;   // 어느 NGO 클라이언트의 요청인지 - 응답을 돌려줄 대상 특정용
+  string player_id = 2;   // 인게임 서버가 검증해서 채운 값
+  oneof command {
+    GetFriendsCommand get_friends = 3;
+    AddFriendCommand add_friend = 4;
+    RemoveFriendCommand remove_friend = 5;
+  }
+}
+
+message GetFriendsCommand {}
+
+message AddFriendCommand {
+  string friend_player_id = 1;
+}
+
+message RemoveFriendCommand {
+  string friend_player_id = 1;
+}
+
 // === 게임 에이전트 → 게임 서버 ===
 
 message GameAgentMessage {
@@ -107,6 +137,7 @@ message GameAgentMessage {
     DrainSignal drain = 3;             // 마스터의 드레인 신호 릴레이
     ApprovalResponse approval_response = 4;  // ConnectionApproval 검증 응답
     CloseRoom close_room = 5;          // 방 취소/제거 요청
+    FriendCommandResponse friend_command_result = 6;  // 친구 관리 명령어 결과
   }
 }
 
@@ -163,4 +194,27 @@ message PlayerRedirect {
 // 동일한 처리(로비 주소 조회 → 세션 이전 → CloseRoom)를 그대로 재사용한다.
 message RoomTimeout {
   string room_id = 1;
+}
+
+message FriendCommandResponse {
+  uint64 client_id = 1;
+  oneof result {
+    GetFriendsResult get_friends = 2;
+    AddFriendResult add_friend = 3;
+    RemoveFriendResult remove_friend = 4;
+  }
+}
+
+message GetFriendsResult {
+  repeated string friend_player_ids = 1;
+}
+
+message AddFriendResult {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message RemoveFriendResult {
+  bool success = 1;
+  string error_message = 2;
 }

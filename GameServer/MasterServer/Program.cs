@@ -1,3 +1,4 @@
+using Shared.Common.Hosting;
 using MasterServer;
 using MasterServer.Debug;
 using MasterServer.Registry;
@@ -10,18 +11,12 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
+builder.ConfigureGameServerEndpoints(grpcPort: 5100, httpPort: 5101);
+
+// KeepAlivePing 설정은 공용 메서드가 다루는 범위 밖이라(마스터 서버 전용 튜닝) 별도로
+// 이어붙인다 - ConfigureKestrel은 여러 번 호출해도 누적 적용된다.
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.ListenAnyIP(5100, listenOptions =>
-    {
-        listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http2;
-    });
-
-    options.ListenAnyIP(5101, listenOptions =>
-    {
-        listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1;
-    });
-
     options.Limits.Http2.KeepAlivePingDelay = TimeSpan.FromSeconds(10);
     options.Limits.Http2.KeepAlivePingTimeout = TimeSpan.FromSeconds(5);
 });

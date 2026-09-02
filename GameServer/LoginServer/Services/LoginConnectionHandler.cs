@@ -113,7 +113,7 @@ internal sealed class LoginConnectionHandler
             Status = PlayerStatus.Lobby, // 곧 로비로 보낼 것이므로 최종 상태를 미리 반영
             CurrentServer = _masterConnection.SelfAddress,
             CurrentToken = initialToken,
-            TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp(),
+            TokenIssuedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
 
         var claimResult = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
@@ -155,6 +155,7 @@ internal sealed class LoginConnectionHandler
                 LobbyAddress = lobby.Value.Address,
                 PlayerId = playerId,
                 Token = initialToken,
+                ChatAddress = _masterConnection.ChatServerAddress,
             },
         }, cancellationToken);
 

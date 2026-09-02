@@ -33,7 +33,7 @@ public interface IAccountRepository
 public sealed class AccountRecord
 {
     public string AccountId { get; set; } = string.Empty;
-    public string Password { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
     public string PlayerId { get; set; } = string.Empty;
     public long CreatedAtUnixMs { get; set; }
 

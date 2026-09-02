@@ -2,6 +2,7 @@ using Confluent.Kafka;
 using LobbyServer.Auth;
 using LobbyServer.Services;
 using MainServer.Common.Heartbeat;
+using Shared.Common.Hosting;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
@@ -15,11 +16,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.WebHost.ConfigureKestrel(options =>
-{
-    options.ListenAnyIP(5200, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
-    options.ListenAnyIP(5201, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
-});
+builder.ConfigureGameServerEndpoints(grpcPort: 5200, httpPort: 5201);
 
 builder.Services.Configure<MasterConnectionOptions>(
     builder.Configuration.GetSection(MasterConnectionOptions.SectionName));

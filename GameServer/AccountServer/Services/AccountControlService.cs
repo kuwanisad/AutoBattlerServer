@@ -1,5 +1,6 @@
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
+using Shared.Common.Auth;
 
 namespace AccountServer.Services;
 
@@ -15,15 +16,18 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
 
     private readonly IAccountRepository _repository;
     private readonly FriendEventOutbox _outbox;
+    private readonly IPasswordHasher _passwordHasher;
     private readonly ILogger<AccountControlService> _logger;
 
     public AccountControlService(
         IAccountRepository repository,
         FriendEventOutbox outbox,
+        IPasswordHasher passwordHasher,
         ILogger<AccountControlService> logger)
     {
         _repository = repository;
         _outbox = outbox;
+        _passwordHasher = passwordHasher;
         _logger = logger;
     }
 
@@ -32,7 +36,11 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
     {
         var record = await _repository.FindAsync(request.AccountId);
 
-        if (record == null || record.Password != request.Password)
+        // record가 없어도 Verify를 굳이 안 부르고 바로 false로 처리 - 어차피 대조할
+        // 해시 자체가 없다. (참고: "계정이 있는지 없는지"를 응답 시간 차이로 추론하는
+        // 타이밍 공격까지는 지금 범위에서 방어 안 함 - 필요해지면 더미 해시 대조를
+        // 추가하는 식으로 시간을 맞출 수 있음.)
+        if (record == null || !_passwordHasher.Verify(request.Password, record.PasswordHash))
         {
             _logger.LogInformation("계정 검증 실패: {AccountId}", request.AccountId);
             return new VerifyAccountResponse { Found = false };
@@ -62,7 +70,7 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         var record = new AccountRecord
         {
             AccountId = request.AccountId,
-            Password = request.Password,
+            PasswordHash = _passwordHasher.Hash(request.Password), // 원문은 여기서 끝, 어디에도 저장 안 함
             PlayerId = playerId,
             CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };

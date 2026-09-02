@@ -27,6 +27,10 @@ public sealed class MasterConnectionService : BackgroundService
     /// <summary>마스터 서버로부터 받은 계정 서버(AccountServer) 주소. 실제로는 로그인 서버만 씀.</summary>
     public string AccountServerAddress { get; private set; } = string.Empty;
 
+    /// <summary>마스터 서버로부터 받은 채팅 서버 주소. 실제로는 로그인 서버만 씀
+    /// (로그인 성공 응답에 실어서 클라에 전달).</summary>
+    public string ChatServerAddress { get; private set; } = string.Empty;
+
     /// <summary>
     /// 마스터 서버로부터 받은 세션 레지스트리(Redis) 원본 주소. ISessionRegistry를 쓰는
     /// 코드는 이걸 직접 몰라도 되지만(SessionRegistryConnector가 알아서 연결), 세션
@@ -279,6 +283,13 @@ public sealed class MasterConnectionService : BackgroundService
                         // 일관성 유지, 안 쓰는 서버는 그냥 무시.
                         AccountServerAddress = message.AccountServer.Address;
                         _logger.LogInformation("계정 서버 주소 수신: {Address}", AccountServerAddress);
+                        break;
+
+                    case MasterMessage.PayloadOneofCase.ChatServer:
+                        // 실제로는 로그인 서버만 이 주소를 쓴다(로그인 성공 응답에 실어서
+                        // 클라에 전달) - AccountServer와 같은 패턴.
+                        ChatServerAddress = message.ChatServer.Address;
+                        _logger.LogInformation("채팅 서버 주소 수신: {Address}", ChatServerAddress);
                         break;
 
                     default:

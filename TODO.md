@@ -452,13 +452,37 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
     `oneof`(`ChatNotice`/`GlobalNotice`)를 둬서 "특정 방 종속 안내"/"방 무관 전역 안내"도
     구조적으로 분리. **실제로 이 메시지를 보내는 서버 쪽 로직은 아직 없음(프로토콜/클라
     수신 경로만 준비)** - 필요한 기능(예: "채팅이 금지되었습니다")이 생기면 그때 구현.
-  - **[미구현] 인게임 서버에서도 친구 관리 명령어 지원** - "인게임 서버에서도 명령어로
-    친구 추가/삭제가 가능해야 한다"는 요구사항. NGO 커스텀 메시지(클라→인게임 서버) →
-    게임 에이전트 릴레이 → `AccountServer` 호출 → 응답 역방향까지, `RoomClosed`/
-    `TokenUpdate` 만들 때 쓴 패턴을 통째로 하나 더 만드는 규모라 다음으로 미룸.
+  - **[완료] 인게임 서버에서도 친구 관리 명령어 지원** - "인게임 서버에서도 명령어로
+    친구 추가/삭제가 가능해야 한다"는 요구사항. `RoomClosed`/`TokenUpdate` 패턴 재사용:
+    `ingame.proto`에 `FriendCommandRequest`/`FriendCommandResponse`(양방향, `GameServerMessage`/
+    `GameAgentMessage`에 각각 추가) 신설. 인게임 서버(Unity)는 NGO `CustomMessagingManager`로
+    "FriendCommand" 수신 → 게임 에이전트로 릴레이 → 게임 에이전트가 `AccountServer`의
+    `GetFriends`/`AddFriend`/`RemoveFriend` 대리 호출 → 응답 역방향(`GameAgentMessage`
+    → `CustomMessagingManager` "FriendCommandResult"). **클라가 요청에 자체 신고한
+    playerId는 신뢰 안 함** - 인게임 서버가 `ConnectionApproval` 때 이미 검증해둔
+    `_clients[clientId].PlayerId`로 반드시 덮어써서 릴레이(`KNOWN_ISSUES.md` #9와 같은
+    원칙). Unity 클라 쪽(`ClientInstance`)엔 `GetFriendsInGameAsync`/`AddFriendInGameAsync`/
+    `RemoveFriendInGameAsync` 신설, `TaskCompletionSource` 기반 요청-응답(채팅과 같은
+    "한 번에 하나만" 단순화).
   - **[미구현] `AccountServer`/계정 데이터의 진짜 DB 전환** - 지금 `InMemoryAccountRepository`는
     여전히 더미. 친구 목록 아웃박스(`FriendEventOutbox`)도 이때 같이 DB 테이블로
     옮겨서 진짜 트랜잭션으로 묶을 것.
+
+- **fire-and-forget 함수 예외 처리 점검 - [완료]**
+  - `_ = SomeAsync(...)`로 아무도 기다리지 않는 백그라운드 함수는, 안에서 예외가 새면
+    아무도 모르게 조용히 죽는다는 게 확인됨(`RunWithReconnectAsync`의 `Task.Delay`
+    구간이 안 감싸져 있던 게 발단). 이런 함수만 골라서 함수 전체(진입 시점부터)를
+    try-catch로 감싸도록 점검 - 오래 걸리거나 반복되는 함수뿐 아니라, 단순 1회성이라도
+    fire-and-forget이면 대상에 포함(`ReconnectToLobbyAsync` 등). 반면 호출자가
+    `await`해서 직접 결과/예외를 받는 함수(`RequestChatAsync` 등)는 내부에서 예외를
+    삼키면 오히려 호출자가 취소 여부를 모르게 되므로 제외.
+  - 점검 대상 7개 중 3개(`RunWithReconnectAsync`, `StayConnectedAsync`,
+    `SendLoopAsync`)는 일부 구간/예외 종류가 안 감싸져 있어서 보강, 1개
+    (`ReconnectToLobbyAsync`)는 아예 안 감싸져 있어서 신규 추가, 1개
+    (`SendRoomClosedAndWaitAckAsync`)는 뒷부분이 안 감싸져 있어서 보강. 나머지 2개
+    (`MatchReceiveLoopAsync`, `GrpcIngameServerChannel.ReceiveLoopAsync`)는 이미 완전히
+    감싸져 있어서 변경 없음. `SendXxxAsync`류(단순 큐잉만 하고 실제로 취소 가능한
+    await가 없는 것들)는 위험이 없다고 보고 제외.
 
 - **친구 시스템 - [완료]** (위 채팅 서버 항목과 통합됨 - 계정 확장 + 채팅방 생성/관리
   전부 완료)
@@ -524,6 +548,42 @@ PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검�
   - 오늘 발견/해결한 12개 문제를 발견-원인-예상 피해-해결 방법-결과 형식으로 기록.
     `ARCHITECTURE.md`의 "보안" 섹션도 오늘 최종 구조에 맞게 전면 갱신하고 관련 항목마다
     상호 링크 연결.
+
+- **비밀번호 해싱 - [완료]**
+  - `AccountServer`가 비밀번호를 평문(`Password`)으로 저장/대조하고 있었음이 뒤늦게
+    발견됨. `Pbkdf2PasswordHasher`(`Shared.Common.Auth`, .NET 기본 라이브러리만 사용,
+    새 패키지 없음) 신설 - 생성 시 해싱, 검증 시 상수 시간 비교로 전환.
+    `AccountRecord.Password` → `PasswordHash`로 필드명 변경.
+
+- **TLS 도입 - [완료, 로컬 개발용 자체 서명 인증서 기준]**
+  - 서버 7개(마스터/로비/게임에이전트/매칭/계정/로그인/채팅) 전부 서버 간 통신 포함
+    적용. `KestrelEndpointExtensions.ConfigureGameServerEndpoints`(`Shared.Common.Hosting`)
+    신설 - `shared.appsettings.json`의 `"UseTls"` 값 하나로 전체 일괄 통제.
+  - **[미구현] 실배포용 정식 인증서 전환** - 지금은 `dotnet dev-certs https --trust`로
+    신뢰한 로컬 개발용 인증서 공유. 실제 도메인이 생기면 Let's Encrypt 등으로 교체 필요.
+
+- **`ChatServerInfo` 마스터 배포 - [완료]**
+  - 채팅 서버 주소가 예전엔 Unity 인스펙터에 고정값(`ws://localhost:8000`)으로 박혀있어서,
+    다른 서버 주소들(매칭/계정 등 마스터가 동적 배포)과 일관성이 없었음. `AccountServerInfo`와
+    완전히 같은 대칭 패턴(신규 등록 시 브로드캐스트 + 기존 등록자 캐치업)으로 배포하도록
+    변경 - 로그인 서버/채팅 서버가 어느 순서로 뜨든 문제없음. `login.proto`의
+    `LoginRedirect`에 `chat_address` 필드 추가, 로그인 성공 응답에 실어서 클라에 전달.
+    Unity `ClientInstance`의 `_chatAddress` 고정 필드 제거.
+
+- **마스터→메인 서버 지시 전달 구조 - 배관은 있음, 실제 효과는 없음**
+  - `MasterCommand`(`BroadcastRelay`/`DrainSignal`) 메시지와 전달 경로 자체는 이미 있음
+    (`MasterServer`의 `/test/broadcast` 테스트 엔드포인트가 발행 → 접속 중인 메인 서버
+    전체에 `_registry.Broadcast`로 뿌림 → 각 메인 서버의 `MasterConnectionService.HandleCommand`가
+    수신).
+  - **[미구현] 받은 뒤 실제 처리** - `HandleCommand`의 두 케이스 다 로그만 찍고
+    `TODO` 주석만 있음:
+    - `Broadcast`(운영 공지): 인게임 서버로 릴레이해서 접속 중인 클라이언트들에게
+      전달하는 로직 없음.
+    - `Drain`(드레인 신호): 신규 매칭/접속 접수를 실제로 중단시키는 로직 없음 - 매칭
+      서버의 대기열 등록 거부, 로비의 `EnterLobby` 거부 등 서버 타입별로 "드레인 중"을
+      어떻게 반영할지 설계 필요.
+  - 이걸 어디까지 확장할지(예: 특정 서버 인스턴스 대상 지정 명령, 설정 핫리로드 신호 등)
+    는 아직 미정 - 실제 필요해지는 시점에 범위 논의 필요.
 
 ---
 

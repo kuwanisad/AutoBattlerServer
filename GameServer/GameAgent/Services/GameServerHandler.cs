@@ -1,5 +1,6 @@
 using Grpc.Core;
 using Grpc.Net.Client;
+using AccountServer;
 using IngameServer;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
@@ -341,6 +342,10 @@ public sealed class GameServerHandler
                         _ = CloseRoomAndRedirectAsync(message.RoomTimeout.RoomId, "방-채움 타임아웃 (결원)");
                         break;
 
+                    case GameServerMessage.PayloadOneofCase.FriendCommand:
+                        _ = HandleFriendCommandAsync(message.FriendCommand, serverInfo);
+                        break;
+
                     case GameServerMessage.PayloadOneofCase.None:
                         break;
 
@@ -523,6 +528,103 @@ public sealed class GameServerHandler
         var written = serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
         {
             ApprovalResponse = response,
+        });
+    }
+
+    /// <summary>
+    /// 인게임 중 클라의 친구 관리(조회/추가/삭제) 요청을 릴레이받아 처리한다. 로비의
+    /// GetFriends/AddFriend/RemoveFriend와 완전히 같은 원칙(친구 관계 판단은 항상
+    /// AccountServer가 실제 데이터를 갖고 있고, 게임 에이전트는 그 대리 호출만 담당) -
+    /// request.PlayerId는 인게임 서버가 ConnectionApproval 때 이미 검증해둔 값으로,
+    /// 클라 자체 신고를 신뢰하지 않는다(ingame.proto의 FriendCommandRequest 문서 참고).
+    /// </summary>
+    private async Task HandleFriendCommandAsync(FriendCommandRequest request, GameServerInfo serverInfo)
+    {
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            _logger.LogWarning("계정 서버 주소 없음 - 친구 명령어 처리 불가: {PlayerId}", request.PlayerId);
+            return;
+        }
+
+        var response = new FriendCommandResponse { ClientId = request.ClientId };
+
+        try
+        {
+            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+            var client = new AccountServer.AccountControl.AccountControlClient(channel);
+
+            switch (request.CommandCase)
+            {
+                case FriendCommandRequest.CommandOneofCase.GetFriends:
+                    var getResponse = await client.GetFriendsAsync(
+                        new AccountServer.GetFriendsRequest { PlayerId = request.PlayerId });
+                    var getFriendsResult = new GetFriendsResult();
+                    getFriendsResult.FriendPlayerIds.AddRange(getResponse.FriendPlayerIds);
+                    response.GetFriends = getFriendsResult;
+                    break;
+
+                case FriendCommandRequest.CommandOneofCase.AddFriend:
+                    var addResponse = await client.AddFriendAsync(new AccountServer.AddFriendRequest
+                    {
+                        PlayerId = request.PlayerId,
+                        FriendPlayerId = request.AddFriend.FriendPlayerId,
+                    });
+                    response.AddFriend = new AddFriendResult
+                    {
+                        Success = addResponse.Success,
+                        ErrorMessage = addResponse.ErrorMessage,
+                    };
+                    break;
+
+                case FriendCommandRequest.CommandOneofCase.RemoveFriend:
+                    var removeResponse = await client.RemoveFriendAsync(new AccountServer.RemoveFriendRequest
+                    {
+                        PlayerId = request.PlayerId,
+                        FriendPlayerId = request.RemoveFriend.FriendPlayerId,
+                    });
+                    response.RemoveFriend = new RemoveFriendResult
+                    {
+                        Success = removeResponse.Success,
+                        ErrorMessage = removeResponse.ErrorMessage,
+                    };
+                    break;
+
+                default:
+                    _logger.LogWarning("알 수 없는 FriendCommand 종류: ClientId={ClientId}", request.ClientId);
+                    return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "친구 명령어 처리 실패: PlayerId={PlayerId}", request.PlayerId);
+            return;
+        }
+
+        serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
+        {
+            FriendCommandResult = response,
+        });
+    }
+
+    /// <summary>
+    /// AccountServer 호출 시 SocketsHttpHandler를 명시적으로 구성한다 - bare
+    /// GrpcChannel.ForAddress로 AccountServer를 호출했을 때 원인 불명의 "HTTP_1_1_REQUIRED"
+    /// 오류가 재현된 적이 있어서(KNOWN_ISSUES.md 참고), 검증된 이 패턴을 그대로 재사용한다.
+    /// </summary>
+    private static GrpcChannel CreateAccountServerChannel(string address)
+    {
+        var handler = new System.Net.Http.SocketsHttpHandler
+        {
+            EnableMultipleHttp2Connections = true,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(10),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
+            KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests,
+        };
+
+        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
+        {
+            HttpHandler = handler,
+            DisposeHttpClient = true,
         });
     }
 

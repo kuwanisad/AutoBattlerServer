@@ -105,8 +105,9 @@
 - 각 서버 인스턴스의 부하/수용량을 추적하는 인스턴스 레지스트리를 관리한다.
 - **접속 서버 인증**: `IServerAuthenticator` 퍼사드로 접속하는 서버를 검증한다. 지금은 `DummyServerAuthenticator`(항상 통과)이고, 나중에 mTLS 도입 시 여러 검증기를 조합하는 `CompositeServerAuthenticator`로 교체할 수 있게 설계했다.
 - **매칭 서버 주소 배포**: 메인 서버가 최초 접속하면(기동 순서는 마스터→매칭→메인) 이미 등록된 매칭 서버 주소를 즉시 전달한다. 매칭 서버가 재등록되면(재시작 등) 접속 중인 메인 서버 전체에 브로드캐스트한다.
+- **계정 서버/채팅 서버 주소 배포**: 매칭 서버와 완전히 같은 대칭 패턴(신규 등록 시 브로드캐스트 + 기존 등록자 대상 캐치업)으로 배포한다. 실제로는 로그인 서버만 이 두 주소를 쓰지만(계정 검증/생성, 로그인 성공 응답에 채팅 주소 포함), 순서 걱정 없이 어느 서버가 먼저 뜨든 동작한다.
 - **세션 레지스트리(Redis) 주소 배포**: 마스터가 `shared.appsettings.json`에서 읽은 Redis 주소를 접속하는 모든 서버 타입(매칭 서버 포함)에 최초 등록 시 바로 전달한다. 메인 서버들은 더 이상 Redis 주소를 로컬 설정에서 직접 읽지 않는다.
-- 드레인 신호로 특정 서버의 신규 접속을 차단한다.
+- **[미구현] 드레인/운영 공지 등 명령 전달**: `MasterCommand`(`BroadcastRelay`/`DrainSignal`) 배관 자체는 마스터→메인 서버 방향으로 이미 존재하지만(`MasterServer`의 `/test/broadcast` 테스트 엔드포인트, `MasterConnectionService.HandleCommand`), 받은 뒤 실제로 뭘 해야 하는지는 전부 로그만 찍고 비어있다(`TODO` 주석만 있음) - 자세한 내용은 TODO.md 참고.
 - 매칭/채팅 등 비즈니스 로직은 담당하지 않는다.
 - (레거시) `RequestIngameAssignment` RPC가 남아있으나 매칭 서버 도입 이후 아무도 호출하지 않는다 - 정리 대상.
 
@@ -199,6 +200,14 @@ NGO 기반 인게임 서버다.
 
 ## 보안
 
+### 전송 구간 암호화 (TLS)
+저장 시 해싱(아래 "비밀번호 저장" 참고)과는 완전히 다른 층위의 문제를 막는다 - 해싱이 "저장소가 뚫렸을 때 원문 노출"을 막는다면, TLS는 "네트워크 경로 어디든(공유기, ISP, 백본 등) 도청당했을 때 원문 노출"을 막는다. 둘 다 필요하고 서로 대체 관계가 아니다.
+
+서버 7개(마스터, 로비, 게임 에이전트, 매칭, 계정, 로그인, 채팅) 전부 서버 간 통신을 포함해 TLS를 적용한다 - `Shared.Common.Hosting.KestrelEndpointExtensions.ConfigureGameServerEndpoints`가 `shared.appsettings.json`의 `"UseTls"` 값 하나로 전체를 일괄 통제한다(코드 재배포 없이 설정만으로 켜고 끔). 로컬 개발 중엔 `dotnet dev-certs https --trust`로 신뢰해둔 .NET 개발용 인증서를 서버들이 공유해서 쓴다. 실제 배포 시 정식 인증서(도메인 필요)로 교체하는 건 별도 작업으로 미뤄둠.
+
+### 비밀번호 저장 - 해싱, 절대 원문 저장 안 함
+`AccountServer`는 비밀번호를 원문(`AccountRecord.Password`)이 아니라 PBKDF2 해시(`AccountRecord.PasswordHash`)로만 저장한다(`Shared.Common.Auth.Pbkdf2PasswordHasher`, .NET 기본 클래스 라이브러리만 사용, 새 NuGet 패키지 없음). 해시는 되돌릴 수 없는 단방향 변환이라 서버조차 원문을 다시 알아낼 방법이 없다 - DB가 통째로 털려도 공격자가 얻는 건 해시값뿐이다. 검증도 원문 대조가 아니라 상수 시간 비교(`CryptographicOperations.FixedTimeEquals`)로 한다.
+
 ### ConnectionApproval
 클라이언트가 게임 서버(NGO)에 접속할 때 `"{playerId}|{token}"` 페이로드를 포함한다. 게임 에이전트가 Redis에서 세션을 조회해 `Moving` 상태, `OwnerServerId` 소유권 이전 여부(`TryClaimOwnershipAsync`), 토큰 유효성(`TokenVerification.IsValid`)을 모두 검증한다. 승인 시 새 토큰을 발급/회전하고 `CustomMessagingManager`의 `"TokenUpdate"` 메시지로 클라에 전달한다. 검증 실패 시 접속을 거부한다. → 자세한 경위는 [`KNOWN_ISSUES.md` #3](./KNOWN_ISSUES.md#3-connection-approval로비인게임에-토큰-검증이-아예-없었음) 참고.
 
@@ -226,6 +235,13 @@ NGO 기반 인게임 서버다.
 ### 친구 삭제 → 채팅방 정리 - 아웃박스 패턴
 `AccountServer.RemoveFriend`는 친구 목록 갱신과 "이벤트 발행 예정" 기록을 원자적으로 같이 남기고, 별도 백그라운드 서비스가 그 기록을 RabbitMQ로 실제 발행(성공해야 기록 삭제)한다. `ChatServer`는 수동 ack(처리 끝나야 ack, 실패 시 재큐잉)로 소비한다 - 둘이 합쳐 "최소 한 번은 처리된다"를 보장한다. → 경위는 [`KNOWN_ISSUES.md` #11](./KNOWN_ISSUES.md#11-accountserver가-rabbitmq-발행-중-죽으면-이벤트가-유실될-수-있는-문제-이중-쓰기-문제), [#12](./KNOWN_ISSUES.md#12-rabbitmqconsumer를-싱글톤으로-등록했더니-여러-구독이-서로의-채널을-덮어씀) 참고.
 
+### 친구 관리 - 클라를 상대하는 메인 서버가 창구, 채팅 서버는 실행만
+친구 관리(조회/추가/삭제)의 실제 데이터는 `AccountServer`가 갖고 있지만, 클라가 직접 그걸 호출하지 않는다. **지금 클라를 상대하는 메인 서버(로비 또는 인게임)가 대리 호출하는 창구 역할**을 한다 - "서비스 제공 가능 여부는 전적으로 메인 서버한테 맡긴다"는 원칙과 같은 결의 결정이다.
+
+- **로비**: `lobby.proto`의 `GetFriends`/`AddFriend`/`RemoveFriend`를 클라가 직접 gRPC로 부르면, 로비가 `AccountServer`를 대리 호출한다.
+- **인게임**: 클라가 NGO `CustomMessagingManager`로 "FriendCommand"를 보내면, 인게임 서버가 게임 에이전트에 릴레이(`ingame.proto`의 `FriendCommandRequest`/`FriendCommandResponse`, `GameServerMessage`/`GameAgentMessage`에 각각 포함)하고, 게임 에이전트가 `AccountServer`를 대리 호출한다. **클라가 요청에 자체 신고한 `player_id`는 신뢰하지 않는다** - 인게임 서버가 `ConnectionApproval` 때 이미 검증해둔 값으로 반드시 덮어써서 릴레이한다(아래 채팅 메시지 신뢰 판단과 같은 원칙).
+- **예외** - `RequestChat`(대화 시작)은 "관리"가 아니라 클라가 이미 붙어있는 채팅 서버에 직접 요청한다. 채팅 서버가 내부적으로(읽기 전용) `AccountServer.GetFriends`를 불러 진짜 친구 사이인지 확인하는 건 이 원칙과 안 어긋난다 - 클라한테 그 기능을 노출하는 게 아니라 자기 방 생성을 검증하려고 남의 데이터를 읽어오는 것뿐이다.
+
 ### 채팅 메시지 신뢰 판단 - 타입으로 구분, 필드 값으로 안 함
 `ChatMessageDelivery`(친구가 보낸 실제 메시지)와 `SystemChatDelivery`(채팅 서버가 직접 보내는 안내)는 완전히 다른 `oneof` 케이스다. "특정 필드가 비어있으면 신뢰할 메시지"같은 규약은 안 쓴다 - 클라가 정상 경로로 만들어낼 수 없는 타입이라는 사실 자체가 신뢰의 근거여야 한다. → 경위는 [`KNOWN_ISSUES.md` #9](./KNOWN_ISSUES.md#9-sender_id를-빈-값으로-시스템-메시지-특수-취급하려다-발견한-스푸핑-위험) 참고.
 
@@ -236,3 +252,12 @@ NGO 기반 인게임 서버다.
 메시지 전송 시 방 권한을 확인하는 시점과 실제 전달/저장 시점 사이에 아주 짧은 틈이 있어, 그 틈에 친구가 삭제되면 메시지 한 통이 새어 들어올 수 있다. 서버는 별도 락을 안 걸고, 클라(`WebSocketChatChannel`)가 `RoomRemoved` 통보 이후의 메시지를 조용히 버리는 "차단 목록" 방식으로 창을 좁힌다. → 경위는 [`KNOWN_ISSUES.md` #8](./KNOWN_ISSUES.md#8-메시지-전송-권한-확인과-실제-전달저장-사이의-race-친구-삭제와-메시지-전송이-겹침) 참고.
 
 전체 발견-원인-피해-해결-결과 상세 기록은 [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md) 참고.
+
+## 코딩 관례
+
+### fire-and-forget 함수는 반드시 함수 전체를 try-catch로 감쌀 것
+`_ = SomeAsync(...)`처럼 아무도 결과를 기다리지 않는(await 안 하는) 함수 안에서 예외가 새면, 그 예외는 아무도 관측하지 못한 채 조용히 사라진다 - 특히 `Task.Delay`, 스트림 반복(`await foreach`) 등 함수 중간의 `await` 지점에서 취소/예외가 나면 함수가 아무 로그도 없이 그냥 멈춰버릴 수 있다. **부분적으로만("이 부분은 위험해 보이니까") 감싸지 말고, 함수 진입 시점부터 끝까지 전체를 감쌀 것** - 정확히 어느 지점이 위험한지 매번 판단하는 것보다, 통째로 감싸는 게 더 안전하고 유지보수하기도 쉽다.
+
+반대로 **호출자가 직접 `await`해서 결과/예외를 받는 함수**(`RequestChatAsync` 등 요청-응답 메서드)는 내부에서 예외를 삼키면 안 된다 - 호출자가 취소/실패 여부를 알아야 하므로, 그 판단은 호출자에게 맡긴다.
+
+대상 예시: `WebSocketChatChannel.RunWithReconnectAsync`, `GrpcLobbyChannel.StayConnectedAsync`, `GrpcIngameServerChannel.SendLoopAsync`, `ClientInstance.ReconnectToLobbyAsync`, `IngameServerInstance.SendRoomClosedAndWaitAckAsync` 등 - 전부 이 원칙에 따라 점검 완료.
