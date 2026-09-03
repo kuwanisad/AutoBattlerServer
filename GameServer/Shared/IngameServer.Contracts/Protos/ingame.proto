@@ -16,6 +16,21 @@ service IngameControl {
   // 게임 서버가 게임 에이전트에 연결하는 양방향 스트림.
   // 연결 자체가 "게임 서버가 살아있다"는 신호다.
   rpc Connect(stream GameServerMessage) returns (stream GameAgentMessage);
+
+  // 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호를 보내면, 게임 에이전트가 지금
+  // 이 플레이어가 자기가 담당하는 게임 서버(Unity)에 접속 중인지 확인하고, 있으면
+  // GameServerMessage 스트림으로 릴레이한다(로비의 StayConnected와 같은 역할, 통로만
+  // 다름). 게임 에이전트는 게임 서버 하나랑만 붙는 사이드카 구조라 "여러 연결 중에
+  // 찾기"는 필요 없다.
+  rpc NotifyMailUpdated(NotifyMailUpdatedRequest) returns (NotifyMailUpdatedResponse);
+}
+
+message NotifyMailUpdatedRequest {
+  string player_id = 1;
+}
+
+message NotifyMailUpdatedResponse {
+  bool success = 1; // 그 클라가 지금 이 게임 에이전트 관할에 접속 중이어서 릴레이했는지
 }
 
 // === 게임 서버 → 게임 에이전트 ===
@@ -138,6 +153,7 @@ message GameAgentMessage {
     ApprovalResponse approval_response = 4;  // ConnectionApproval 검증 응답
     CloseRoom close_room = 5;          // 방 취소/제거 요청
     FriendCommandResponse friend_command_result = 6;  // 친구 관리 명령어 결과
+    MailProvided mail_provided = 7;    // 우편함 갱신 - 게임 서버(Unity)가 특정 클라한테 전달
   }
 }
 
@@ -217,4 +233,18 @@ message AddFriendResult {
 message RemoveFriendResult {
   bool success = 1;
   string error_message = 2;
+}
+
+message MailProvided {
+  string player_id = 1;  // 어느 클라인지 - 게임 서버(Unity)가 clientId로 매핑하는 데 씀
+  repeated MailInfo mails = 2;
+}
+
+message MailInfo {
+  string mail_id = 1;
+  string mail_type = 2;
+  string display_content = 3;
+  int64 created_at_unix_ms = 4;
+  int64 expires_at_unix_ms = 5;
+  bool claimed = 6;
 }

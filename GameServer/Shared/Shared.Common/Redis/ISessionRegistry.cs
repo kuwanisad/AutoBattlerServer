@@ -119,6 +119,14 @@ public sealed class PlayerSession
     public string OwnerServerId { get; set; } = string.Empty;
 
     /// <summary>
+    /// 소유 서버의 타입(Lobby/Ingame 등). 우편함 시스템에서 하위 서버가 "이 플레이어를
+    /// 지금 관리 중인 서버가 로비인지 게임 에이전트인지" 구분해서 서로 다른 RPC를
+    /// 걸어야 하는데, 주소만으로는 타입을 알 수 없어서 추가함. OwnerServerId와 함께
+    /// 원자적으로 갱신된다.
+    /// </summary>
+    public GameServer.Common.ServerType OwnerServerType { get; set; }
+
+    /// <summary>
     /// 현재 유효한 토큰. 서버 이동 시 클라가 이 값을 제출하면 통과한다.
     /// </summary>
     public string CurrentToken { get; set; } = string.Empty;
@@ -141,7 +149,7 @@ public sealed class PlayerSession
 }
 
 /// <summary>플레이어를 현재 소유한 서버 정보.</summary>
-public sealed record OwnerInfo(string ServerId, string? Address, bool IsAlive);
+public sealed record OwnerInfo(string ServerId, string? Address, bool IsAlive, GameServer.Common.ServerType ServerType);
 
 /// <summary>권한 이전 시도 결과. 거부된 경우 기존 소유자 정보를 담을 수 있다.</summary>
 public sealed record ClaimResult(bool Claimed, OwnerInfo? PreviousOwner);

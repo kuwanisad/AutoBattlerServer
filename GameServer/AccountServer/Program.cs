@@ -30,6 +30,9 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 // 계정 저장소 - 지금은 인메모리 더미. 진짜 SQL 서버가 생기면 이 등록만 교체.
 builder.Services.AddSingleton<IAccountRepository, InMemoryAccountRepository>();
 
+// 우편함 - 하위 서버가 처리 결과를 영속 기록하는 곳.
+builder.Services.AddSingleton<IMailRepository, InMemoryMailRepository>();
+
 // 비밀번호는 절대 원문으로 저장 안 함 - PBKDF2 해시만 저장.
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 

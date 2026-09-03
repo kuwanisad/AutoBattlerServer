@@ -42,6 +42,13 @@ service LobbyControl {
   // 더 가볍다(클라 수만큼 반복 발생하는 메시지가 없음).
   rpc StayConnected(StayConnectedRequest) returns (stream StayConnectedEvent);
 
+  // === 우편함 ===
+  // 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호만 보낸다(내용은 안 실림) -
+  // 로비가 직접 AccountServer한테 최신 목록을 조회해서 StayConnected 스트림으로
+  // 밀어준다. 그 순간 이 로비에 접속 중이 아니면 success=false - 하위 서버는 이걸
+  // "실패"로 취급 안 해도 된다(다음 접속 시 자동 제공이 안전망이므로).
+  rpc NotifyMailUpdated(NotifyMailUpdatedRequest) returns (NotifyMailUpdatedResponse);
+
   // === 매치메이킹 ===
   // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
   // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
@@ -70,9 +77,36 @@ message EnterLobbyRequest {}
 message StayConnectedRequest {}
 
 // 내용 없음 - 스트림이 살아있다는 사실 자체가 목적이라 실제로 이벤트를 보낼 필요가
-// 거의 없다. 나중에 "당신 앞으로 대기줄이 몇 명 남았습니다" 같은 로비 전용 알림이
-// 필요해지면 여기 필드를 채우면 된다.
-message StayConnectedEvent {}
+// 거의 없다. 우편함 제공(MailProvided)이 지금 유일하게 이 스트림을 실제로 쓰는 경우.
+message StayConnectedEvent {
+  oneof payload {
+    MailProvided mail_provided = 1;
+  }
+}
+
+message NotifyMailUpdatedRequest {
+  string player_id = 1;
+}
+
+message NotifyMailUpdatedResponse {
+  bool success = 1; // 그 클라가 지금 이 로비에 접속 중이어서 신호를 실제로 전달했는지
+}
+
+// account.proto의 MailSummary와 필드가 같아야 한다(JSON이 아니라 gRPC라 타입을 그대로
+// 재사용할 수도 있었지만, 계정 서버와 로비 서버가 서로의 내부 타입을 참조할 필요가
+// 없게 - FriendRemovedEvent 때와 같은 이유로 로컬에 따로 둔다).
+message MailProvided {
+  repeated MailInfo mails = 1;
+}
+
+message MailInfo {
+  string mail_id = 1;
+  string mail_type = 2;
+  string display_content = 3;
+  int64 created_at_unix_ms = 4;
+  int64 expires_at_unix_ms = 5;
+  bool claimed = 6;
+}
 
 message EnterLobbyResponse {
   bool success = 1;

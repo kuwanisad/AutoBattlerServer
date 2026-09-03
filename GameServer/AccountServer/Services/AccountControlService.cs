@@ -17,17 +17,20 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
     private readonly IAccountRepository _repository;
     private readonly FriendEventOutbox _outbox;
     private readonly IPasswordHasher _passwordHasher;
+    private readonly IMailRepository _mailRepository;
     private readonly ILogger<AccountControlService> _logger;
 
     public AccountControlService(
         IAccountRepository repository,
         FriendEventOutbox outbox,
         IPasswordHasher passwordHasher,
+        IMailRepository mailRepository,
         ILogger<AccountControlService> logger)
     {
         _repository = repository;
         _outbox = outbox;
         _passwordHasher = passwordHasher;
+        _mailRepository = mailRepository;
         _logger = logger;
     }
 
@@ -145,5 +148,93 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
 
         _logger.LogInformation("친구 삭제: {PlayerId} ↔ {FriendPlayerId}", request.PlayerId, request.FriendPlayerId);
         return new RemoveFriendResponse { Success = true };
+    }
+
+    // === 우편함 ===
+
+    public override async Task<GrantMailResponse> GrantMail(GrantMailRequest request, ServerCallContext context)
+    {
+        // 멱등성 - 같은 원본 이벤트로 이미 지급했으면 새로 안 만들고 그 mailId를 그대로 반환.
+        if (!string.IsNullOrEmpty(request.SourceEventId))
+        {
+            var existingMailId = await _mailRepository.FindExistingBySourceEventIdAsync(
+                request.PlayerId, request.SourceEventId);
+            if (existingMailId != null)
+            {
+                _logger.LogInformation("우편 지급 - 이미 처리된 이벤트(멱등): {PlayerId} SourceEventId={SourceEventId}",
+                    request.PlayerId, request.SourceEventId);
+                return new GrantMailResponse { Success = true, MailId = existingMailId };
+            }
+        }
+
+        var record = new MailRecord
+        {
+            PlayerId = request.PlayerId,
+            SourceEventId = request.SourceEventId,
+            MailType = request.MailType,
+            DisplayContent = request.DisplayContent,
+            PayloadJson = request.PayloadJson,
+            CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ExpiresAtUnixMs = request.ExpiresAtUnixMs,
+        };
+
+        var mailId = await _mailRepository.CreateAsync(record);
+
+        _logger.LogInformation("우편 지급: {PlayerId} MailType={MailType} MailId={MailId}",
+            request.PlayerId, request.MailType, mailId);
+
+        return new GrantMailResponse { Success = true, MailId = mailId };
+    }
+
+    public override async Task<GetMailListResponse> GetMailList(GetMailListRequest request, ServerCallContext context)
+    {
+        var mails = await _mailRepository.GetForPlayerAsync(request.PlayerId);
+
+        var response = new GetMailListResponse();
+        foreach (var m in mails)
+        {
+            response.Mails.Add(new MailSummary
+            {
+                MailId = m.MailId,
+                MailType = m.MailType,
+                DisplayContent = m.DisplayContent,
+                CreatedAtUnixMs = m.CreatedAtUnixMs,
+                ExpiresAtUnixMs = m.ExpiresAtUnixMs,
+                Claimed = m.Claimed,
+            });
+        }
+        return response;
+    }
+
+    public override async Task<OpenMailResponse> OpenMail(OpenMailRequest request, ServerCallContext context)
+    {
+        // 실제 성패 판정은 TryClaimAsync 하나가 원자적으로 끝낸다 - 그 앞뒤로 별도 조회를
+        // 끼워넣지 않는다(그 사이 다른 요청이 끼어드는 race를 만들지 않기 위함).
+        var claimed = await _mailRepository.TryClaimAsync(request.PlayerId, request.MailId);
+
+        if (!claimed)
+        {
+            // 실패했다는 것만 원자적으로 확정됐고, 정확한 사유는 여기서 최선을 다해
+            // 재조회로 추정한다 - 그 사이 상태가 또 바뀌었을 수 있어 100% 정확하진
+            // 않지만, 클라한테 "없는 메일입니다" 같은 뭉뚱그린 에러보다는 훨씬 낫다.
+            var record = await _mailRepository.FindAsync(request.PlayerId, request.MailId);
+            var reason = record switch
+            {
+                null => "NOT_FOUND",
+                { Claimed: true } => "ALREADY_CLAIMED",
+                _ when record.ExpiresAtUnixMs != 0 &&
+                       record.ExpiresAtUnixMs < DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() => "EXPIRED",
+                _ => "UNKNOWN",
+            };
+
+            _logger.LogInformation("우편 수령 실패: {PlayerId} MailId={MailId} Reason={Reason}",
+                request.PlayerId, request.MailId, reason);
+            return new OpenMailResponse { Success = false, ErrorMessage = reason };
+        }
+
+        var mail = await _mailRepository.FindAsync(request.PlayerId, request.MailId);
+        _logger.LogInformation("우편 수령 성공: {PlayerId} MailId={MailId}", request.PlayerId, request.MailId);
+
+        return new OpenMailResponse { Success = true, PayloadJson = mail?.PayloadJson ?? string.Empty };
     }
 }

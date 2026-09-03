@@ -1,4 +1,5 @@
 using Shared.Common.Hosting;
+using GameServer.Common;
 using MasterServer;
 using MasterServer.Debug;
 using MasterServer.Registry;
@@ -33,22 +34,41 @@ var app = builder.Build();
 app.MapGrpcService<MasterControlService>();
 app.MapGet("/", () => "Master Server gRPC 엔드포인트입니다. gRPC 클라이언트로 접속하세요.");
 
-app.MapPost("/test/broadcast", (InstanceRegistry registry, string message) =>
+app.MapPost("/admin/shutdown", (
+    InstanceRegistry registry,
+    string? instanceId,
+    ServerType? serverType,
+    long gracePeriodMs,
+    string reason) =>
 {
-    var masterMessage = new MasterMessage
+    var message = new MasterMessage
     {
-        Command = new MasterCommand
+        Instruction = new MasterServerInstruction
         {
-            Broadcast = new BroadcastRelay
-            {
-                Message = message,
-                ExpiresAtUnixMs = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeMilliseconds(),
-            },
+            Shutdown = new ShutdownTask { GracePeriodMs = gracePeriodMs, Reason = reason },
         },
     };
 
-    registry.Broadcast(masterMessage);
-    return Results.Ok($"{registry.GetAll().Count}개 접속 중인 인스턴스 큐에 브로드캐스트 적재");
+    // "누구한테 보낼지"는 여기(발행하는 시점)에서만 판단한다 - 메시지 자체엔 target
+    // 정보를 안 담는다. 받는 쪽은 자기가 어떻게 선택돼서 이 메시지를 받았는지 몰라도 됨.
+    if (!string.IsNullOrEmpty(instanceId))
+    {
+        registry.Enqueue(instanceId, message);
+        return Results.Ok($"인스턴스 {instanceId}에 종료 지시 전달");
+    }
+
+    if (serverType.HasValue)
+    {
+        var targets = registry.GetByType(serverType.Value).ToList();
+        foreach (var instance in targets)
+        {
+            registry.Enqueue(instance.InstanceId, message);
+        }
+        return Results.Ok($"{serverType} 타입 {targets.Count}개 인스턴스에 종료 지시 전달");
+    }
+
+    registry.Broadcast(message);
+    return Results.Ok($"접속 중인 전체 {registry.GetAll().Count}개 인스턴스에 종료 지시 전달");
 });
 
 app.Run();

@@ -171,7 +171,7 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         }
 
         var address = await GetServerAddressAsync(session.OwnerServerId);
-        return new OwnerInfo(session.OwnerServerId, address, address != null);
+        return new OwnerInfo(session.OwnerServerId, address, address != null, session.OwnerServerType);
     }
 
     public async Task<bool> TryClaimOwnershipAsync(string serverId, string playerId, PlayerSession newSession)
@@ -210,7 +210,11 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         if (!string.IsNullOrEmpty(previousOwnerServerId))
         {
             var address = await GetServerAddressAsync(previousOwnerServerId);
-            previousOwner = new OwnerInfo(previousOwnerServerId, address, address != null);
+            // 이전 소유자의 ServerType은 Lua 스크립트가 안 돌려줘서(직렬화된 세션 문자열을
+            // 다시 통째로 파싱해야 알 수 있는데, 이 호출부는 주소만 쓰고 타입은 안 써서
+            // 굳이 추가 조회를 안 함) Unspecified로 둔다.
+            previousOwner = new OwnerInfo(previousOwnerServerId, address, address != null,
+                GameServer.Common.ServerType.Unspecified);
         }
 
         return new ClaimResult(false, previousOwner);

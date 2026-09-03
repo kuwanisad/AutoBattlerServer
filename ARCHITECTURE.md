@@ -107,7 +107,7 @@
 - **매칭 서버 주소 배포**: 메인 서버가 최초 접속하면(기동 순서는 마스터→매칭→메인) 이미 등록된 매칭 서버 주소를 즉시 전달한다. 매칭 서버가 재등록되면(재시작 등) 접속 중인 메인 서버 전체에 브로드캐스트한다.
 - **계정 서버/채팅 서버 주소 배포**: 매칭 서버와 완전히 같은 대칭 패턴(신규 등록 시 브로드캐스트 + 기존 등록자 대상 캐치업)으로 배포한다. 실제로는 로그인 서버만 이 두 주소를 쓰지만(계정 검증/생성, 로그인 성공 응답에 채팅 주소 포함), 순서 걱정 없이 어느 서버가 먼저 뜨든 동작한다.
 - **세션 레지스트리(Redis) 주소 배포**: 마스터가 `shared.appsettings.json`에서 읽은 Redis 주소를 접속하는 모든 서버 타입(매칭 서버 포함)에 최초 등록 시 바로 전달한다. 메인 서버들은 더 이상 Redis 주소를 로컬 설정에서 직접 읽지 않는다.
-- **[미구현] 드레인/운영 공지 등 명령 전달**: `MasterCommand`(`BroadcastRelay`/`DrainSignal`) 배관 자체는 마스터→메인 서버 방향으로 이미 존재하지만(`MasterServer`의 `/test/broadcast` 테스트 엔드포인트, `MasterConnectionService.HandleCommand`), 받은 뒤 실제로 뭘 해야 하는지는 전부 로그만 찍고 비어있다(`TODO` 주석만 있음) - 자세한 내용은 TODO.md 참고.
+- **메인 서버 지시(`MasterServerInstruction`)**: 마스터가 특정 메인 서버(들)에게 업무를 지시한다. "누구한테 보낼지"(특정 인스턴스/특정 서버 타입/전체)는 메시지 자체엔 안 담고, 마스터가 발행하는 순간(`/admin/shutdown` 엔드포인트)에만 판단한다 - 받는 서버는 자기가 어떻게 선택돼서 그 메시지를 받았는지 몰라도 된다. `task`를 `oneof`로 둬서 확장 가능하게 설계했다(지금은 `ShutdownTask`만 있음, 새 업무 종류는 여기 케이스만 추가). 마스터↔메인 서버 간 이미 있던 상시 스트림(하트비트/주소 배포와 같은 통로)을 그대로 쓰고, 새 연결은 안 만든다. `MasterConnectionService`가 기본 동작(유예 시간 대기 후 정상 종료)을 수행하고, 서버 타입별 커스터마이즈가 필요하면 `OnShutdownRequested` 이벤트를 구독하면 된다. 실제 배포 시 수동으로 서버들을 하나씩 끄던 걸 이걸로 대체하는 게 목표. **[미구현] `Drain`**: 신규 접속/매칭 접수를 중단시키는 업무는 서버 타입별로 뭘 해야 할지 달라서 아직 설계 전 - `task` `oneof`에 새 케이스로 추가하는 확장 구조는 이미 갖춰져 있음.
 - 매칭/채팅 등 비즈니스 로직은 담당하지 않는다.
 - (레거시) `RequestIngameAssignment` RPC가 남아있으나 매칭 서버 도입 이후 아무도 호출하지 않는다 - 정리 대상.
 
@@ -252,6 +252,40 @@ NGO 기반 인게임 서버다.
 메시지 전송 시 방 권한을 확인하는 시점과 실제 전달/저장 시점 사이에 아주 짧은 틈이 있어, 그 틈에 친구가 삭제되면 메시지 한 통이 새어 들어올 수 있다. 서버는 별도 락을 안 걸고, 클라(`WebSocketChatChannel`)가 `RoomRemoved` 통보 이후의 메시지를 조용히 버리는 "차단 목록" 방식으로 창을 좁힌다. → 경위는 [`KNOWN_ISSUES.md` #8](./KNOWN_ISSUES.md#8-메시지-전송-권한-확인과-실제-전달저장-사이의-race-친구-삭제와-메시지-전송이-겹침) 참고.
 
 전체 발견-원인-피해-해결-결과 상세 기록은 [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md) 참고.
+
+## 우편함 (Mail)
+
+`DummySubServer`(결제/보상/광고 등을 처리하는 백엔드 워커)가 처리한 결과를 클라에게 어떻게 전달할지 논의하다가 확립된 시스템. **핵심 원칙: "실제 상태 변경"과 "그 알림"을 분리한다** - 실제 상태 변경(보상 지급 등)은 `AccountServer`에 영속적으로 먼저 기록되고, 알림은 best-effort다(놓쳐도 클라가 나중에 재조회로 만회 가능). 업계 표준 "메일함/인박스" 패턴(Heroic Labs, Unity, LootLocker 등이 쓰는 것과 같은 개념)을 따른다.
+
+**왜 채팅 서버가 아니라 `AccountServer`가 담당하는가**: 메일 "개봉"은 단순 열람이 아니라 보상 지급이 같이 일어나는 경제적 트랜잭션이다. 지급과 열람 시점이 어긋나면(캐시성 보상을 미리 지급해두고 메시지만 나중에 보내는 식) CS 분쟁으로 이어질 수 있어서, "수령"은 계정 데이터를 원자적으로 다루는 `AccountServer`가 책임진다.
+
+### 전체 흐름
+```
+1. 메인 서버 → 하위 서버: RabbitMQ로 지시 하달 (reward-queue 등 기존 큐 재사용)
+2. 하위 서버(DummySubServer.MailGranter) → AccountServer.GrantMail
+   - source_event_id로 멱등성 보장(RabbitMQ가 "최소 한 번" 배달이라 재시도로 중복 지급될 수 있음)
+3. AccountServer가 영속 저장 후 적용 완료 통지
+4. 하위 서버가 세션 레지스트리(ISessionRegistry.GetOwnerAsync)로 그 플레이어를 지금 누가 관리 중인지 조회
+5. 있으면(온라인이면) 그 서버(로비 or 게임 에이전트, OwnerInfo.ServerType으로 구분)한테
+   "우편물 제공" 신호만 전달(내용은 안 실음) - 없으면 아무것도 안 함
+6. 신호 받은 서버가 AccountServer.GetMailList를 직접 조회해서 그 즉시 클라한테 전달
+7. 모든 메인 서버는 클라 접속 시점에도 항상 자동으로 우편함을 제공한다(공통 규약) -
+   4~6번이 어떤 이유로든 실패해도(하위 서버 다운 등) 이게 최종 안전망
+8. 클라가 메일 클릭 → 확인 → mail_id로 AccountServer.OpenMail 요청 →
+   그 순간 재검증(만료/중복수령 여부) 후 원자적으로 수령 처리 + 보상 지급
+```
+
+**로비**: `StayConnected` 스트림(이미 있던 생존 감지 채널)을 그대로 재사용한다 - `NotifyMailUpdated` RPC가 오면 그 플레이어의 채널(`Channel<StayConnectedEvent>`, playerId별로 관리)에 `MailProvided`를 넣고, `StayConnected` 핸들러가 그 채널을 순차적으로 읽어서 스트림에 쓴다(동시 쓰기 방지 - 여러 곳에서 같은 스트림에 직접 쓰면 깨질 수 있어서, 쓰기는 이 핸들러 하나만 담당).
+
+**게임 에이전트**: `GameServerInfo.GetClientId(playerId)`로 지금 이 게임 에이전트가 담당하는 게임 서버에 그 플레이어가 접속 중인지 확인 후, `GameAgentMessage.MailProvided`로 게임 서버(Unity)에 릴레이한다. Unity `IngameServerInstance`가 `PlayerId`로 `clientId`를 역탐색(선형 탐색 - 방 하나당 인원이 적어 문제없음)해서 NGO `CustomMessagingManager`로 실제 클라에게 전달한다.
+
+**`OwnerInfo.ServerType`/`PlayerSession.OwnerServerType`**: 하위 서버가 주소만으로는 "로비인지 게임 에이전트인지" 구분할 수 없어서 추가했다. `TryClaimOwnershipAsync` 계열 메서드 시그니처는 안 건드리고, 호출부(`LobbyControlService.EnterLobby`, `GameServerHandler.HandleApprovalRequestAsync`)가 세션 객체에 미리 채워서 넘기는 방식으로 파급 범위를 최소화했다.
+
+### mail_id 기반 식별 - 클라 UI 안정성의 핵심
+목록이 백그라운드에서 갱신돼도(새 메일 도착 등) 기존에 뜬 확인창/버튼이 가리키는 메일이 안 바뀌어야 한다 - "몇 번째 항목" 같은 위치 기반이 아니라 `mail_id`(안정적 식별자)로 항상 참조한다. 클릭 핸들러도 객체 참조가 아니라 `mail_id` 문자열만 캡처해야 한다. 클라 내부 자료구조는 `Dictionary<mailId, MailInfo>`가 진짜 데이터이고, UI에 보이는 "날짜순 정렬된 목록"은 그 딕셔너리에서 매번 파생시키는 뷰로 다뤄야 한다(별도로 유지관리하는 정렬 리스트를 따로 안 둠). 서버 측 재검증(`OpenMail`)과 합쳐지면, 어떤 타이밍에 뭐가 어긋나도 클라한테 애매한 에러 없이 명확한 사유(`ALREADY_CLAIMED`/`EXPIRED`/`NOT_FOUND`)로 처리된다.
+
+### ⚠⚠⚠ 클라이언트(Unity) UI 연동은 서버 배선과 별개로 신중히 다룰 것
+서버 측(로비/게임 에이전트/`AccountServer`/`DummySubServer`, Unity의 `IngameServerInstance`까지)은 전부 완료됐다. **`ClientInstance.cs`(실제 클라이언트)의 수신 처리와 UI(메일함 화면, 클릭→확인→개봉 흐름, 알림음/배지)는 의도적으로 손 안 댔다** - 이건 단순 배선이 아니라 실제 게임 UI와 밀접하게 엮인 작업이라, 위 `mail_id` 기반 식별 원칙을 UI 코드가 정확히 안 지키면 "확인창 떠있는 동안 배경이 갱신되는" 류의 race가 실제로 터질 수 있다. UI 설계와 반드시 같이 논의해서 진행할 것.
 
 ## 코딩 관례
 

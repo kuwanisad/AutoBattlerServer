@@ -10,6 +10,7 @@ using Shared.Common;
 using Shared.Common.Auth;
 using Shared.Common.Messaging;
 using Shared.Common.Redis;
+using System.Collections.Concurrent;
 
 namespace LobbyServer.Services;
 
@@ -27,6 +28,11 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     private static readonly TimeSpan EnterLobbyRateLimitWindow = TimeSpan.FromMilliseconds(300);
 
     private readonly ITokenProvider _tokenProvider;
+
+    // playerId → StayConnected 채널. NotifyMailUpdated 등 다른 요청 핸들러가 이미 열려
+    // 있는 StayConnected 스트림에 뭔가를 push해야 할 때 이걸 통해서만 쓴다(직접 스트림에
+    // 안 씀 - 동시 쓰기 방지).
+    private readonly ConcurrentDictionary<string, System.Threading.Channels.Channel<StayConnectedEvent>> _stayConnectedChannels = new();
     private readonly ISessionRegistry _sessionRegistry;
     private readonly IRateLimiter _rateLimiter;
     private readonly MasterConnectionService _masterConnection;
@@ -138,6 +144,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             CurrentToken = newToken,
             PreviousToken = existing?.CurrentToken ?? string.Empty,
             TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp(),
+            OwnerServerType = GameServer.Common.ServerType.Lobby,
         };
 
         var result = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
@@ -161,9 +168,14 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     }
 
     /// <summary>
-    /// EnterLobby 성공 직후 클라가 연다. 내용은 안 주고받고, 이 스트림이 살아있다는
-    /// 사실 자체가 "클라가 아직 로비에 있다"는 증거다. 클라가 끊거나(와이파이 등) 서버가
-    /// 종료될 때까지 그냥 대기만 한다.
+    /// EnterLobby 성공 직후 클라가 연다. 스트림이 살아있다는 사실 자체가 "클라가 아직
+    /// 로비에 있다"는 증거이자, 이 스트림을 통해 우편함 갱신 등을 push하는 통로이기도
+    /// 하다. 클라가 끊거나(와이파이 등) 서버가 종료될 때까지 유지된다.
+    ///
+    /// 실제 쓰기(WriteAsync)는 이 메서드 하나만 담당한다 - NotifyMailUpdated 등 다른
+    /// 요청 핸들러가 같은 스트림에 직접 쓰면 동시 쓰기로 깨질 수 있어서, 그쪽은 이
+    /// 연결 전용 채널(Channel)에 넣기만 하고, 여기서 그 채널을 읽어서 순차적으로
+    /// 스트림에 쓴다(게임 에이전트의 OutboundQueue와 같은 패턴).
     /// </summary>
     public override async Task StayConnected(
         StayConnectedRequest request,
@@ -173,17 +185,95 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var playerId = context.UserState["playerId"] as string;
         if (string.IsNullOrEmpty(playerId)) return;
 
+        var channel = System.Threading.Channels.Channel.CreateUnbounded<StayConnectedEvent>();
+        _stayConnectedChannels[playerId] = channel;
+
         try
         {
-            await Task.Delay(Timeout.Infinite, context.CancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // 정상 - 스트림 종료(클라 이탈 또는 서버 종료)
+            // 접속 시 자동 제공(안전망) - 신호를 기다리지 않고 여기서 곧장 한 번 조회.
+            // 신호(NotifyMailUpdated)가 어떤 이유로든 못 오더라도 이걸로 항상 만회된다.
+            await ProvideMailAsync(playerId, channel.Writer);
+
+            var sendLoopTask = Task.Run(async () =>
+            {
+                await foreach (var evt in channel.Reader.ReadAllAsync(context.CancellationToken))
+                {
+                    await responseStream.WriteAsync(evt);
+                }
+            }, context.CancellationToken);
+
+            try
+            {
+                await Task.Delay(Timeout.Infinite, context.CancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // 정상 - 스트림 종료(클라 이탈 또는 서버 종료)
+            }
+
+            channel.Writer.TryComplete();
+            await sendLoopTask;
         }
         finally
         {
+            _stayConnectedChannels.TryRemove(playerId, out _);
             await HandleStayConnectedEndedAsync(playerId);
+        }
+    }
+
+    /// <summary>
+    /// 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호를 보내면, 지금 이 로비에
+    /// 접속 중일 때만(StayConnected 채널이 있을 때만) AccountServer에서 최신 목록을
+    /// 조회해서 그 채널에 넣는다. 접속 중이 아니면 그냥 success=false - 하위 서버
+    /// 입장에서는 실패로 취급 안 해도 된다(다음 접속 시 자동 제공이 안전망).
+    /// </summary>
+    public override async Task<NotifyMailUpdatedResponse> NotifyMailUpdated(
+        NotifyMailUpdatedRequest request, ServerCallContext context)
+    {
+        if (!_stayConnectedChannels.TryGetValue(request.PlayerId, out var channel))
+        {
+            return new NotifyMailUpdatedResponse { Success = false };
+        }
+
+        await ProvideMailAsync(request.PlayerId, channel.Writer);
+        return new NotifyMailUpdatedResponse { Success = true };
+    }
+
+    /// <summary>AccountServer한테 최신 우편함을 조회해서 StayConnected 채널에 넣는다.
+    /// 접속 시 자동 제공과 신호 수신 시 즉시 제공, 둘 다 이 메서드 하나로 통일한다.</summary>
+    private async Task ProvideMailAsync(string playerId, System.Threading.Channels.ChannelWriter<StayConnectedEvent> writer)
+    {
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            _logger.LogWarning("계정 서버 주소 없음 - 우편함 제공 불가: {PlayerId}", playerId);
+            return;
+        }
+
+        try
+        {
+            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+            var client = new AccountServer.AccountControl.AccountControlClient(channel);
+            var response = await client.GetMailListAsync(new AccountServer.GetMailListRequest { PlayerId = playerId });
+
+            var mailProvided = new MailProvided();
+            foreach (var m in response.Mails)
+            {
+                mailProvided.Mails.Add(new MailInfo
+                {
+                    MailId = m.MailId,
+                    MailType = m.MailType,
+                    DisplayContent = m.DisplayContent,
+                    CreatedAtUnixMs = m.CreatedAtUnixMs,
+                    ExpiresAtUnixMs = m.ExpiresAtUnixMs,
+                    Claimed = m.Claimed,
+                });
+            }
+
+            writer.TryWrite(new StayConnectedEvent { MailProvided = mailProvided });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "우편함 제공 실패: {PlayerId}", playerId);
         }
     }
 

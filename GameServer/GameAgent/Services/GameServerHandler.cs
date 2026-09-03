@@ -505,6 +505,7 @@ public sealed class GameServerHandler
             session.PreviousToken = session.CurrentToken;
             session.CurrentToken = newToken;
             session.TokenIssuedAtUnixMs = TimeUtils.CurrentTimestamp();
+            session.OwnerServerType = GameServer.Common.ServerType.Ingame;
 
             var claimed = await _sessionRegistry.TryClaimOwnershipAsync(
                 _masterConnection.InstanceId, request.PlayerId, session);
@@ -522,6 +523,10 @@ public sealed class GameServerHandler
                 serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
                 _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
                     request.ClientId, request.PlayerId);
+
+                // 접속 시 자동 우편함 제공(안전망) - 로비의 StayConnected 시작 시 자동
+                // 제공과 대칭. 아무도 안 기다리는 fire-and-forget이라 함수 전체를 감싼다.
+                _ = ProvideMailOnConnectAsync(request.PlayerId, serverInfo);
             }
         }
 
@@ -604,6 +609,72 @@ public sealed class GameServerHandler
         {
             FriendCommandResult = response,
         });
+    }
+
+    /// <summary>
+    /// <summary>
+    /// ConnectionApproval 승인 직후 자동으로 우편함을 제공한다(안전망) - 로비의
+    /// StayConnected 시작 시 자동 제공과 대칭. 아무도 안 기다리는 fire-and-forget이라
+    /// 함수 전체를 감싼다(코딩 관례 - ARCHITECTURE.md 참고).
+    /// </summary>
+    private async Task ProvideMailOnConnectAsync(string playerId, GameServerInfo serverInfo)
+    {
+        try
+        {
+            await ProvideMailAsync(playerId, serverInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "접속 시 우편함 자동 제공 실패: {PlayerId}", playerId);
+        }
+    }
+
+    /// <summary>
+    /// 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호(NotifyMailUpdated)를 보내면
+    /// 호출된다. 지금 이 게임 에이전트가 담당하는 게임 서버에 그 플레이어가 접속
+    /// 중일 때만 실제로 전달한다.
+    /// </summary>
+    public async Task<bool> NotifyMailUpdatedAsync(string playerId)
+    {
+        if (_serverInfo == null) return false;
+
+        var clientId = _serverInfo.GetClientId(playerId);
+        if (clientId == null) return false; // 이 게임 서버엔 접속 중이 아님
+
+        await ProvideMailAsync(playerId, _serverInfo);
+        return true;
+    }
+
+    /// <summary>AccountServer한테 최신 우편함을 조회해서 게임 서버(Unity)한테 릴레이한다.
+    /// 접속 시 자동 제공과 신호 수신 시 즉시 제공, 둘 다 이 메서드 하나로 통일한다
+    /// (로비의 ProvideMailAsync와 같은 역할).</summary>
+    private async Task ProvideMailAsync(string playerId, GameServerInfo serverInfo)
+    {
+        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
+        {
+            _logger.LogWarning("계정 서버 주소 없음 - 우편함 제공 불가: {PlayerId}", playerId);
+            return;
+        }
+
+        using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
+        var client = new AccountServer.AccountControl.AccountControlClient(channel);
+        var response = await client.GetMailListAsync(new AccountServer.GetMailListRequest { PlayerId = playerId });
+
+        var mailProvided = new MailProvided { PlayerId = playerId };
+        foreach (var m in response.Mails)
+        {
+            mailProvided.Mails.Add(new MailInfo
+            {
+                MailId = m.MailId,
+                MailType = m.MailType,
+                DisplayContent = m.DisplayContent,
+                CreatedAtUnixMs = m.CreatedAtUnixMs,
+                ExpiresAtUnixMs = m.ExpiresAtUnixMs,
+                Claimed = m.Claimed,
+            });
+        }
+
+        serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage { MailProvided = mailProvided });
     }
 
     /// <summary>

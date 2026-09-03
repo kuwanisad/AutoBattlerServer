@@ -19,6 +19,13 @@ service AccountControl {
   rpc GetFriends(GetFriendsRequest) returns (GetFriendsResponse);
   rpc AddFriend(AddFriendRequest) returns (AddFriendResponse);
   rpc RemoveFriend(RemoveFriendRequest) returns (RemoveFriendResponse);
+
+  // 우편함 - 하위 서버가 처리한 결과(보상 지급 등)를 영속 기록하고, 클라가 나중에
+  // 조회/수령한다. "수령"이 단순 열람이 아니라 보상 지급이 같이 일어나는 경제적
+  // 트랜잭션이라, 채팅 서버가 아니라 계정 데이터를 원자적으로 다루는 여기서 담당한다.
+  rpc GrantMail(GrantMailRequest) returns (GrantMailResponse);
+  rpc GetMailList(GetMailListRequest) returns (GetMailListResponse);
+  rpc OpenMail(OpenMailRequest) returns (OpenMailResponse);
 }
 
 message VerifyAccountRequest {
@@ -68,4 +75,56 @@ message RemoveFriendRequest {
 message RemoveFriendResponse {
   bool success = 1;
   string error_message = 2;
+}
+
+// === 우편함 ===
+
+// source_event_id로 멱등성을 보장한다 - Kafka/RabbitMQ는 "최소 한 번" 배달이라 하위
+// 서버가 같은 원본 이벤트로 두 번 호출할 수 있는데, 이미 처리된 source_event_id면
+// 조용히 같은 결과(같은 mail_id)를 돌려주고 새로 지급하지 않는다.
+message GrantMailRequest {
+  string player_id = 1;
+  string source_event_id = 2;
+  string mail_type = 3;         // 예: "ENHANCE_STONE_GRANT" - 필터/판별용, JSON 밖 일반 컬럼으로 저장
+  string display_content = 4;   // 사람이 읽는 문구
+  string payload_json = 5;      // 첨부물 상세 구성(가변적) - JSON 컬럼에 저장
+  int64 expires_at_unix_ms = 6; // 0이면 만료 없음
+}
+
+message GrantMailResponse {
+  bool success = 1;
+  string mail_id = 2;
+  string error_message = 3;
+}
+
+message GetMailListRequest {
+  string player_id = 1;
+}
+
+message GetMailListResponse {
+  repeated MailSummary mails = 1;
+}
+
+message MailSummary {
+  string mail_id = 1;
+  string mail_type = 2;
+  string display_content = 3;
+  int64 created_at_unix_ms = 4;
+  int64 expires_at_unix_ms = 5;
+  bool claimed = 6;
+}
+
+// mail_id로만 지정한다 - 클라가 로컬에서 "몇 번째 항목"처럼 위치로 기억하지 않고
+// 항상 이 안정적 식별자로 요청한다는 전제.
+message OpenMailRequest {
+  string player_id = 1;
+  string mail_id = 2;
+}
+
+message OpenMailResponse {
+  bool success = 1;
+  // 실패 시 사유: "NOT_FOUND"(존재하지 않음), "ALREADY_CLAIMED"(이미 수령됨),
+  // "EXPIRED"(만료됨) - 클라가 이 중 뭐든 명확한 사유를 보여줄 수 있게.
+  string error_message = 2;
+  string payload_json = 3; // 성공 시 - 실제 지급된 첨부물 상세
 }

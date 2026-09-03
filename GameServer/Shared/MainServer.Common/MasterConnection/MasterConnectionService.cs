@@ -19,6 +19,7 @@ public sealed class MasterConnectionService : BackgroundService
 {
     private readonly MasterConnectionOptions _options;
     private readonly ISessionRegistryConnector _sessionRegistryConnector;
+    private readonly IHostApplicationLifetime _appLifetime;
     private readonly ILogger<MasterConnectionService> _logger;
 
     /// <summary>마스터 서버로부터 받은 매칭 서버 주소.</summary>
@@ -60,10 +61,12 @@ public sealed class MasterConnectionService : BackgroundService
     public MasterConnectionService(
         IOptions<MasterConnectionOptions> options,
         ISessionRegistryConnector sessionRegistryConnector,
+        IHostApplicationLifetime appLifetime,
         ILogger<MasterConnectionService> logger)
     {
         _options = options.Value;
         _sessionRegistryConnector = sessionRegistryConnector;
+        _appLifetime = appLifetime;
         _logger = logger;
     }
 
@@ -261,8 +264,8 @@ public sealed class MasterConnectionService : BackgroundService
                     case MasterMessage.PayloadOneofCase.Heartbeat:
                         break;
 
-                    case MasterMessage.PayloadOneofCase.Command:
-                        HandleCommand(message.Command);
+                    case MasterMessage.PayloadOneofCase.Instruction:
+                        HandleInstruction(message.Instruction, stoppingToken);
                         break;
 
                     case MasterMessage.PayloadOneofCase.MatchingServer:
@@ -304,24 +307,55 @@ public sealed class MasterConnectionService : BackgroundService
         }
     }
 
-    private void HandleCommand(MasterCommand command)
-    {
-        switch (command.CommandCase)
-        {
-            case MasterCommand.CommandOneofCase.Broadcast:
-                _logger.LogInformation("운영 공지 수신: {Message}", command.Broadcast.Message);
-                // TODO: 인게임 서버로 릴레이, 접속 중인 클라이언트들에게 전달
-                break;
+    /// <summary>
+    /// 서버별로 종료 전에 정리할 게 있으면(예: 매칭 서버는 신규 대기열 등록 거부, 로비는
+    /// EnterLobby 거부) 이 이벤트를 구독해서 처리할 수 있다. 아무도 구독 안 하면 기본
+    /// 동작(유예 시간만큼 대기 후 그냥 종료)만 일어난다.
+    /// </summary>
+    public event Action<ShutdownTask>? OnShutdownRequested;
 
-            case MasterCommand.CommandOneofCase.Drain:
-                _logger.LogInformation("드레인 신호 수신: 신규 수용 중단={Stop}", command.Drain.StopAcceptingNew);
-                // TODO: 신규 매칭 접수 중단
+    private void HandleInstruction(MasterServerInstruction instruction, CancellationToken stoppingToken)
+    {
+        switch (instruction.TaskCase)
+        {
+            case MasterServerInstruction.TaskOneofCase.Shutdown:
+                HandleShutdown(instruction.Shutdown, stoppingToken);
                 break;
 
             default:
-                _logger.LogWarning("알 수 없는 MasterCommand 종류: {Case}", command.CommandCase);
+                _logger.LogWarning("알 수 없는 MasterServerInstruction 종류: {Case}", instruction.TaskCase);
                 break;
         }
+    }
+
+    private void HandleShutdown(ShutdownTask task, CancellationToken stoppingToken)
+    {
+        _logger.LogWarning("마스터로부터 종료 지시 수신: 사유={Reason} 유예={GraceMs}ms",
+            task.Reason, task.GracePeriodMs);
+
+        OnShutdownRequested?.Invoke(task);
+
+        // fire-and-forget - 이 메서드 자체는 수신 루프를 막으면 안 되므로 대기를 별도
+        // Task로 분리한다. 함수 전체를 감싸는 이유는 아무도 기다리지 않는 fire-and-forget이라
+        // 예외가 새면 조용히 사라지기 때문(ARCHITECTURE.md "코딩 관례" 참고).
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(task.GracePeriodMs), stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // 정상 - 유예 시간 다 채우기 전에 서버가 어차피 종료 절차를 시작함
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "종료 유예 대기 중 예외");
+            }
+
+            _logger.LogWarning("종료 유예 시간 종료 - 프로세스를 정상 종료합니다.");
+            _appLifetime.StopApplication();
+        });
     }
 
     /// <summary>

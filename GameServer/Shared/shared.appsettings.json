@@ -1,4 +1,5 @@
 {
+  "UseTls": true,
   "Kafka": {
     "BootstrapServers": "localhost:9092"
   },

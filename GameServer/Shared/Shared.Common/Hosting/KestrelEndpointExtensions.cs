@@ -44,4 +44,24 @@ public static class KestrelEndpointExtensions
 
         return useTls;
     }
+
+    /// <summary>
+    /// REST 보조 포트가 없는 서버용 오버로드(예: MatchingServer - gRPC 포트 하나만 씀).
+    /// 로직은 완전히 같고 포트 하나만 덜 여는 것뿐이라, 별도로 베껴 쓰지 않고 여기 묶어둔다.
+    /// </summary>
+    public static bool ConfigureGameServerEndpoints(this WebApplicationBuilder builder, int grpcPort)
+    {
+        var useTls = builder.Configuration.GetValue<bool>("UseTls");
+
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.ListenAnyIP(grpcPort, listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http2;
+                if (useTls) listenOptions.UseHttps();
+            });
+        });
+
+        return useTls;
+    }
 }

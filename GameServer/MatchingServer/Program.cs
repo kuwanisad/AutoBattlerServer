@@ -2,7 +2,7 @@ using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MatchingServer.Registry;
 using MatchingServer.Services;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Hosting;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,10 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.WebHost.ConfigureKestrel(options =>
-{
-    options.ListenAnyIP(6000, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
-});
+builder.ConfigureGameServerEndpoints(grpcPort: 6000);
 
 // 마스터 서버 연결
 builder.Services.Configure<MasterConnectionOptions>(

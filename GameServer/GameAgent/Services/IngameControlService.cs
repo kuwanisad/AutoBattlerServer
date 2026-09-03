@@ -41,4 +41,16 @@ public sealed class IngameControlService : IngameControl.IngameControlBase
 
         _logger.LogInformation("게임 서버 Connect 종료");
     }
+
+    /// <summary>
+    /// 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호를 보내면 호출된다. 실제
+    /// 처리(이 게임 에이전트에 접속 중인지 확인 후 릴레이)는 GameServerHandler가
+    /// 담당한다 - 얇은 껍데기 원칙을 여기서도 유지.
+    /// </summary>
+    public override async Task<NotifyMailUpdatedResponse> NotifyMailUpdated(
+        NotifyMailUpdatedRequest request, ServerCallContext context)
+    {
+        var success = await _handler.NotifyMailUpdatedAsync(request.PlayerId);
+        return new NotifyMailUpdatedResponse { Success = success };
+    }
 }
