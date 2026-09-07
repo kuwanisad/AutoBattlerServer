@@ -43,6 +43,9 @@ public sealed class GameServerHandler
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ITokenProvider _tokenProvider;
     private readonly RabbitMqProducer _rabbitMqProducer;
+    private readonly IngameMailDeliverer _mailDeliverer;
+    private readonly IngameAccountServerIntermediary _accountServer;
+    private readonly IngameAgentMainServerIntermediary _mainServerIntermediary;
     private readonly ILogger<GameServerHandler> _logger;
     private GameServerInfo? _serverInfo;
 
@@ -83,6 +86,9 @@ public sealed class GameServerHandler
         ISessionRegistry sessionRegistry,
         ITokenProvider tokenProvider,
         RabbitMqProducer rabbitMqProducer,
+        IngameMailDeliverer mailDeliverer,
+        IngameAccountServerIntermediary accountServer,
+        IngameAgentMainServerIntermediary mainServerIntermediary,
         ILogger<GameServerHandler> logger)
     {
         _masterConnection = masterConnection;
@@ -90,6 +96,9 @@ public sealed class GameServerHandler
         _sessionRegistry = sessionRegistry;
         _tokenProvider = tokenProvider;
         _rabbitMqProducer = rabbitMqProducer;
+        _mailDeliverer = mailDeliverer;
+        _accountServer = accountServer;
+        _mainServerIntermediary = mainServerIntermediary;
         _logger = logger;
     }
 
@@ -168,6 +177,11 @@ public sealed class GameServerHandler
 
             if (lobby != null)
             {
+                // 일회용 임시 티켓을 대상 전원분 한 번에 발급 + 로비한테 미리 통지
+                // (KNOWN_ISSUES.md 참고) - 개별 호출 대신 배치로 묶어서 왕복을 줄인다.
+                var tickets = await _mainServerIntermediary.IssueAndNotifyAsync(
+                    connectedPlayerIds, lobby.Value.Address);
+
                 foreach (var playerId in connectedPlayerIds)
                 {
                     var session = await _sessionRegistry.GetAsync(playerId);
@@ -180,12 +194,14 @@ public sealed class GameServerHandler
                     session.CurrentServer = string.Empty;
                     session.NextServer = lobby.Value.Address;
                     session.OwnerServerId = lobby.Value.ServerId;
+                    session.OwnerServerType = GameServer.Common.ServerType.Lobby;
                     await _sessionRegistry.UpdateAsync(playerId, session);
 
                     redirects.Add(new PlayerRedirect
                     {
                         PlayerId = playerId,
                         LobbyAddress = lobby.Value.Address,
+                        TransferTicket = tickets[playerId],
                     });
                 }
 
@@ -346,6 +362,10 @@ public sealed class GameServerHandler
                         _ = HandleFriendCommandAsync(message.FriendCommand, serverInfo);
                         break;
 
+                    case GameServerMessage.PayloadOneofCase.GetMailList:
+                        _ = HandleGetMailListAsync(message.GetMailList, serverInfo);
+                        break;
+
                     case GameServerMessage.PayloadOneofCase.None:
                         break;
 
@@ -495,6 +515,17 @@ public sealed class GameServerHandler
             response.Reason = "INVALID_TOKEN";
             _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
         }
+        else if (session.OwnerServerType == GameServer.Common.ServerType.Lobby &&
+                 !_mainServerIntermediary.TryConsume(request.PlayerId, request.TransferTicket))
+        {
+            // 로비에서 오는 전환이면 일회용 임시 티켓도 검증한다 - 훔친 영구 토큰으로
+            // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 재접속(이미
+            // 이 게임 에이전트가 소유자였던 경우)은 로비가 애초에 이 게임 에이전트한테
+            // 티켓을 등록해준 적이 없으므로 대상이 아니다 - OwnerServerType으로 구분한다.
+            response.Approved = false;
+            response.Reason = "INVALID_TRANSFER_TICKET";
+            _logger.LogWarning("접속 거부 - 전입 티켓 불일치/만료: PlayerId={PlayerId}", request.PlayerId);
+        }
         else
         {
             // 권한 이전 요청 - 기존 서버(로비)가 죽었거나 이미 이전됐으면 승인.
@@ -545,35 +576,22 @@ public sealed class GameServerHandler
     /// </summary>
     private async Task HandleFriendCommandAsync(FriendCommandRequest request, GameServerInfo serverInfo)
     {
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogWarning("계정 서버 주소 없음 - 친구 명령어 처리 불가: {PlayerId}", request.PlayerId);
-            return;
-        }
-
         var response = new FriendCommandResponse { ClientId = request.ClientId };
 
         try
         {
-            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-
             switch (request.CommandCase)
             {
                 case FriendCommandRequest.CommandOneofCase.GetFriends:
-                    var getResponse = await client.GetFriendsAsync(
-                        new AccountServer.GetFriendsRequest { PlayerId = request.PlayerId });
+                    var getResponse = await _accountServer.GetFriendsAsync(request.PlayerId);
                     var getFriendsResult = new GetFriendsResult();
                     getFriendsResult.FriendPlayerIds.AddRange(getResponse.FriendPlayerIds);
                     response.GetFriends = getFriendsResult;
                     break;
 
                 case FriendCommandRequest.CommandOneofCase.AddFriend:
-                    var addResponse = await client.AddFriendAsync(new AccountServer.AddFriendRequest
-                    {
-                        PlayerId = request.PlayerId,
-                        FriendPlayerId = request.AddFriend.FriendPlayerId,
-                    });
+                    var addResponse = await _accountServer.AddFriendAsync(
+                        request.PlayerId, request.AddFriend.FriendPlayerId);
                     response.AddFriend = new AddFriendResult
                     {
                         Success = addResponse.Success,
@@ -582,11 +600,8 @@ public sealed class GameServerHandler
                     break;
 
                 case FriendCommandRequest.CommandOneofCase.RemoveFriend:
-                    var removeResponse = await client.RemoveFriendAsync(new AccountServer.RemoveFriendRequest
-                    {
-                        PlayerId = request.PlayerId,
-                        FriendPlayerId = request.RemoveFriend.FriendPlayerId,
-                    });
+                    var removeResponse = await _accountServer.RemoveFriendAsync(
+                        request.PlayerId, request.RemoveFriend.FriendPlayerId);
                     response.RemoveFriend = new RemoveFriendResult
                     {
                         Success = removeResponse.Success,
@@ -611,7 +626,21 @@ public sealed class GameServerHandler
         });
     }
 
-    /// <summary>
+    /// <summary>인게임 중 클라의 능동적 우편함 조회 요청(새로고침 등)을 릴레이받아 처리한다.
+    /// 응답은 접속 시 자동 제공/신호 즉시 제공과 같은 GameAgentMessage.MailProvided를
+    /// 그대로 재사용한다.</summary>
+    private async Task HandleGetMailListAsync(IngameServer.GetMailListRequest request, GameServerInfo serverInfo)
+    {
+        try
+        {
+            await _mailDeliverer.DeliverAsync(request.PlayerId, serverInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "우편함 조회 요청 처리 실패: {PlayerId}", request.PlayerId);
+        }
+    }
+
     /// <summary>
     /// ConnectionApproval 승인 직후 자동으로 우편함을 제공한다(안전망) - 로비의
     /// StayConnected 시작 시 자동 제공과 대칭. 아무도 안 기다리는 fire-and-forget이라
@@ -621,7 +650,7 @@ public sealed class GameServerHandler
     {
         try
         {
-            await ProvideMailAsync(playerId, serverInfo);
+            await _mailDeliverer.DeliverAsync(playerId, serverInfo);
         }
         catch (Exception ex)
         {
@@ -641,63 +670,14 @@ public sealed class GameServerHandler
         var clientId = _serverInfo.GetClientId(playerId);
         if (clientId == null) return false; // 이 게임 서버엔 접속 중이 아님
 
-        await ProvideMailAsync(playerId, _serverInfo);
+        await _mailDeliverer.DeliverAsync(playerId, _serverInfo);
         return true;
     }
 
-    /// <summary>AccountServer한테 최신 우편함을 조회해서 게임 서버(Unity)한테 릴레이한다.
-    /// 접속 시 자동 제공과 신호 수신 시 즉시 제공, 둘 다 이 메서드 하나로 통일한다
-    /// (로비의 ProvideMailAsync와 같은 역할).</summary>
-    private async Task ProvideMailAsync(string playerId, GameServerInfo serverInfo)
-    {
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogWarning("계정 서버 주소 없음 - 우편함 제공 불가: {PlayerId}", playerId);
-            return;
-        }
-
-        using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-        var client = new AccountServer.AccountControl.AccountControlClient(channel);
-        var response = await client.GetMailListAsync(new AccountServer.GetMailListRequest { PlayerId = playerId });
-
-        var mailProvided = new MailProvided { PlayerId = playerId };
-        foreach (var m in response.Mails)
-        {
-            mailProvided.Mails.Add(new MailInfo
-            {
-                MailId = m.MailId,
-                MailType = m.MailType,
-                DisplayContent = m.DisplayContent,
-                CreatedAtUnixMs = m.CreatedAtUnixMs,
-                ExpiresAtUnixMs = m.ExpiresAtUnixMs,
-                Claimed = m.Claimed,
-            });
-        }
-
-        serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage { MailProvided = mailProvided });
-    }
-
-    /// <summary>
-    /// AccountServer 호출 시 SocketsHttpHandler를 명시적으로 구성한다 - bare
-    /// GrpcChannel.ForAddress로 AccountServer를 호출했을 때 원인 불명의 "HTTP_1_1_REQUIRED"
-    /// 오류가 재현된 적이 있어서(KNOWN_ISSUES.md 참고), 검증된 이 패턴을 그대로 재사용한다.
-    /// </summary>
-    private static GrpcChannel CreateAccountServerChannel(string address)
-    {
-        var handler = new System.Net.Http.SocketsHttpHandler
-        {
-            EnableMultipleHttp2Connections = true,
-            KeepAlivePingDelay = TimeSpan.FromSeconds(10),
-            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
-            KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests,
-        };
-
-        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
-        {
-            HttpHandler = handler,
-            DisposeHttpClient = true,
-        });
-    }
+    /// <summary>로비가 "이 플레이어들이 곧 이 게임 에이전트로 올 것"이라며 일회용 임시
+    /// 티켓을 미리 등록하면 호출된다(IngameControlService.RegisterIncomingTransfers).</summary>
+    public void RegisterIncomingTransfers(IEnumerable<(string PlayerId, string Ticket)> tickets) =>
+        _mainServerIntermediary.OnRegisterIncomingTransfersReceived(tickets);
 
     private async Task HandlePlayerJoinedAsync(PlayerJoined joined, GameServerInfo serverInfo)
     {
@@ -757,6 +737,12 @@ public sealed class GameServerHandler
                 : GameServer.Common.GameType.Unspecified;
         }
 
+        // PlayerLeft가 여기까지 도착했다는 사실 자체가 "예기치 못한 이탈"이라는 뜻이다 -
+        // 정상 종료(CloseRoomAndRedirectAsync)로 인한 이탈은 게임 서버(Unity)의
+        // OnClientDisconnected가 RoomManager로 이미 걸러내고 이 메시지 자체를 안 보낸다
+        // (KNOWN_ISSUES.md 참고 - 예전엔 게임 에이전트가 별도 플래그로 이걸 판단하려다가
+        // 불필요한 프로세스 간 왕복+경합을 만들었던 걸 여기로 옮겨서 해결함).
+
         if (!GetAllowReconnect(gameType))
         {
             // 재접 불가능한 방 - 소유권을 즉시 놓는다. 클라가 아무 로비에나 재접속하면
@@ -768,6 +754,7 @@ public sealed class GameServerHandler
                 session.CurrentServer = string.Empty;
                 session.NextServer = "lobby";
                 session.OwnerServerId = string.Empty;
+                session.OwnerServerType = GameServer.Common.ServerType.Unspecified;
                 await _sessionRegistry.UpdateAsync(left.PlayerId, session);
             }
             return;

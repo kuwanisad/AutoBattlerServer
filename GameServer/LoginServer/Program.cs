@@ -26,6 +26,7 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 // 토큰 발급 - 로그인 서버가 최초 토큰을 발급하는 유일한 곳이다(EnterLobby는 발급/회전만
 // 하고 최초 발급은 안 함). ITokenProvider는 여러 서버가 공유하므로 Shared.Common에 있다.
 builder.Services.AddSingleton<ITokenProvider, DummyTokenProvider>();
+builder.Services.AddSingleton<LoginAccountServerIntermediary>();
 
 // 인증 없음 - 로그인 서버는 클라가 아직 아무 신원도 없는 상태에서 접속하는 최초
 // 진입점이라 AuthInterceptor 자체가 없다.

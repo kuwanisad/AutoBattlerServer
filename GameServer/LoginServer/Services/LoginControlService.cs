@@ -14,9 +14,10 @@ public sealed class LoginControlService : LoginControl.LoginControlBase
         MasterConnectionService masterConnection,
         ISessionRegistry sessionRegistry,
         ITokenProvider tokenProvider,
+        LoginAccountServerIntermediary accountServer,
         ILogger<LoginControlService> logger)
     {
-        _handler = new LoginConnectionHandler(masterConnection, sessionRegistry, tokenProvider, logger);
+        _handler = new LoginConnectionHandler(masterConnection, sessionRegistry, tokenProvider, accountServer, logger);
     }
 
     public override Task Connect(

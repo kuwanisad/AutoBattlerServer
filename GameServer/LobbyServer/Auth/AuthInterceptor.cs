@@ -9,9 +9,19 @@ namespace LobbyServer.Auth;
 /// 모든 gRPC 요청에서 토큰을 자동으로 검증하는 인터셉터.
 /// Login/CreateAccount는 코드에서 제거됐다 - 로그인 서버가 최초 진입을 전담한다.
 /// 지금은 EnterLobby부터 토큰이 필요하다.
+///
+/// 예외: ServerToServerMethods에 있는 메서드는 검증을 건너뛴다 - 플레이어가 아니라
+/// 다른 백엔드 서버(하위 서버 등)가 부르는 RPC라 애초에 플레이어 토큰이 없다.
+/// NotifyMailUpdated가 첫 사례(우편함 시스템 - DummySubServer가 호출).
 /// </summary>
 public sealed class AuthInterceptor : Interceptor
 {
+    private static readonly HashSet<string> ServerToServerMethods = new()
+    {
+        "/LobbyControl/NotifyMailUpdated",
+        "/LobbyControl/RegisterIncomingTransfers",
+    };
+
     private readonly ITokenProvider _tokenProvider;
     private readonly ILogger<AuthInterceptor> _logger;
 
@@ -26,7 +36,10 @@ public sealed class AuthInterceptor : Interceptor
         ServerCallContext context,
         UnaryServerMethod<TRequest, TResponse> continuation)
     {
-        ValidateToken(context);
+        if (!ServerToServerMethods.Contains(context.Method))
+        {
+            ValidateToken(context);
+        }
         return await continuation(request, context);
     }
 
@@ -36,7 +49,10 @@ public sealed class AuthInterceptor : Interceptor
         ServerCallContext context,
         ServerStreamingServerMethod<TRequest, TResponse> continuation)
     {
-        ValidateToken(context);
+        if (!ServerToServerMethods.Contains(context.Method))
+        {
+            ValidateToken(context);
+        }
         await continuation(request, responseStream, context);
     }
 

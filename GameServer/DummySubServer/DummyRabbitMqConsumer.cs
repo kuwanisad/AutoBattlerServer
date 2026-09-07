@@ -1,6 +1,7 @@
 using RabbitMQ.Client.Events;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Shared.Common.Account;
 using SubServer.Common.Messaging;
 using System.Text.Json;
 
@@ -22,16 +23,16 @@ internal sealed record RewardEvent(
 
 public sealed class DummyRabbitMqConsumer : RabbitMqConsumerBase
 {
-    private readonly MailGranter _mailGranter;
+    private readonly RemoteMailNotifier _mailNotifier;
     private readonly ILogger<DummyRabbitMqConsumer> _logger;
 
     public DummyRabbitMqConsumer(
         IOptions<RabbitMqConsumerOptions> options,
-        MailGranter mailGranter,
+        RemoteMailNotifier mailNotifier,
         ILogger<DummyRabbitMqConsumer> logger)
         : base(options, logger)
     {
-        _mailGranter = mailGranter;
+        _mailNotifier = mailNotifier;
         _logger = logger;
     }
 
@@ -65,9 +66,9 @@ public sealed class DummyRabbitMqConsumer : RabbitMqConsumerBase
             return;
         }
 
-        // GrantAndNotifyAsync가 던지는 예외는 여기서 안 삼킨다 - RabbitMqConsumerBase가
+        // GrantAndNotifyRemoteAsync가 던지는 예외는 여기서 안 삼킨다 - RabbitMqConsumerBase가
         // 이걸 보고 Nack(재큐잉)하도록 그대로 위로 전파한다.
-        await _mailGranter.GrantAndNotifyAsync(
+        await _mailNotifier.GrantAndNotifyRemoteAsync(
             evt.PlayerId, evt.SourceEventId, evt.MailType, evt.DisplayContent, evt.PayloadJson);
     }
 }

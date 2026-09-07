@@ -123,6 +123,12 @@ public sealed class PlayerSession
     /// 지금 관리 중인 서버가 로비인지 게임 에이전트인지" 구분해서 서로 다른 RPC를
     /// 걸어야 하는데, 주소만으로는 타입을 알 수 없어서 추가함. OwnerServerId와 함께
     /// 원자적으로 갱신된다.
+    ///
+    /// 참고: ServerType은 원래 범용 서버 구분용 열거형이지만, 여기선 "권한을 가질 수
+    /// 있는 서버 타입"이라는 좁은 의미로도 쓰인다 - 예를 들어 Login은 아주 찰나만
+    /// 권한을 갖는 특수 상태라, 그 순간 제3자가 이 값을 보고 로그인 서버한테 뭔가
+    /// 요청하면 안 됨(보안). Chat/Matching/Account/SubServer는 애초에 권한을 가질
+    /// 개념 자체가 없어서 이 필드에 설정될 일이 원천적으로 없다.
     /// </summary>
     public GameServer.Common.ServerType OwnerServerType { get; set; }
 

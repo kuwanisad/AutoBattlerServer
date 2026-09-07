@@ -30,6 +30,7 @@ public sealed class WebSocketHandler
     private readonly IChatFilter _chatFilter;
     private readonly ChatConnectionRegistry _connections;
     private readonly MasterConnectionService _masterConnection;
+    private readonly ChatAccountServerIntermediary _accountServer;
     private readonly ILogger<WebSocketHandler> _logger;
 
     public WebSocketHandler(
@@ -39,6 +40,7 @@ public sealed class WebSocketHandler
         IChatFilter chatFilter,
         ChatConnectionRegistry connections,
         MasterConnectionService masterConnection,
+        ChatAccountServerIntermediary accountServer,
         ILogger<WebSocketHandler> logger)
     {
         _sessionRegistry = sessionRegistry;
@@ -47,6 +49,7 @@ public sealed class WebSocketHandler
         _chatFilter = chatFilter;
         _connections = connections;
         _masterConnection = masterConnection;
+        _accountServer = accountServer;
         _logger = logger;
     }
 
@@ -312,29 +315,9 @@ public sealed class WebSocketHandler
     /// <summary>AccountServer.GetFriends를 직접(내부적으로, 읽기 전용) 호출해서 친구인지 확인한다.</summary>
     private async Task<bool> IsFriendAsync(string playerId, string friendPlayerId)
     {
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogWarning("계정 서버 주소 없음 - 친구 확인 불가: {PlayerId}", playerId);
-            return false;
-        }
-
         try
         {
-            var handler = new System.Net.Http.SocketsHttpHandler
-            {
-                EnableMultipleHttp2Connections = true,
-                KeepAlivePingDelay = TimeSpan.FromSeconds(10),
-                KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
-                KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests,
-            };
-
-            using var channel = Grpc.Net.Client.GrpcChannel.ForAddress(
-                _masterConnection.AccountServerAddress,
-                new Grpc.Net.Client.GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
-
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-            var response = await client.GetFriendsAsync(new AccountServer.GetFriendsRequest { PlayerId = playerId });
-
+            var response = await _accountServer.GetFriendsAsync(playerId);
             return response.FriendPlayerIds.Contains(friendPlayerId);
         }
         catch (Exception ex)

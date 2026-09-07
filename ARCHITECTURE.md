@@ -68,9 +68,6 @@
   ├── 접속 끊김 시 CompensatingTransaction으로 진행 중이던 매치를 되돌림
   └── [예정] Redis Sorted Set 기반 실력 점수 매칭 - 지금은 더미(1명이면 즉시 매칭)
 
-백업 서버 (.NET 8) [예정]
-  └── 마스터 서버를 제외한 다른 서버가 죽었을 때 대신 업무를 이어받음
-
 하위 서버들 (.NET 8)
   ├── 보상 서버: RabbitMQ work queue 소비 [예정]
   ├── 결제 서버: RabbitMQ work queue 소비 [예정]
@@ -172,10 +169,6 @@ NGO 기반 인게임 서버다.
 - [예정] Redis Sorted Set으로 실력 점수 기반 매칭 대기열을 관리한다. 지금은 더미(대기자 1명이면 즉시 매칭).
 - [예정] 매칭 수락 화면 지원.
 
-### 백업 서버 [예정]
-
-마스터 서버를 제외한 다른 서버가 죽었을 때 대신 업무를 이어받는다. 상세 설계는 추후 논의.
-
 ### Redis Session Registry
 
 플레이어와 서버의 "관리 권한 기록부"다. 방 상태 같은 각 서버의 업무 데이터는 여기 두지 않는다(각 서버 로컬 메모리에서 관리 - 예: 매칭 서버의 `_matches`, 인게임 서버의 `RoomManager`. 방은 그 방을 연 서버와 운명을 같이 하므로 외부에 복제해봤자 의미가 없다는 판단).
@@ -195,6 +188,46 @@ NGO 기반 인게임 서버다.
 **RabbitMQ**: 보상 지급, 결제 처리, 신고 처리 등 정확히 한 번 처리가 보장돼야 하는 작업에 쓴다. Work queue 패턴으로 하위 서버들이 소비한다. Fanout exchange로 운영 공지를 브로드캐스트한다. (하위 서버 자체가 아직 더미만 있음)
 
 **Redis**: Session Registry(관리 권한 기록부), 매칭 대기열(예정), 채팅 Pub/Sub에 쓴다. 인메모리라 응답이 빠르고 TTL로 자동 만료가 가능하다.
+
+---
+
+## 서버 이동과 재접속
+
+클라가 로그인→로비→인게임→로비를 오가는 각 전환 지점에서, 정상 흐름과 그 도중 발생 가능한 이벤트(끊김, 실패, 타임아웃)를 각각 어떤 클래스/함수가 처리하는지 정리한다.
+
+### 로비 → 인게임 전환
+
+**정상 흐름**: `LobbyControlService.RequestMatch`(클라가 스트림을 염) → `MatchNotificationDispatcher.HandleMatchNotificationAsync`(매칭 서버로부터 확정 알림을 받음, `Confirmed` 분기) → 세션을 `Moving`+`OwnerServerType.Ingame`으로 갱신 → `LobbyMainServerIntermediary.IssueAndNotifyAsync`(전입 티켓 발급 + 게임 에이전트의 `IngameControlService.RegisterIncomingTransfers`에 미리 등록) → `MatchFound`(티켓 포함)를 스트림에 씀 → 클라(Unity)가 `ClientInstance.OnMatchFound`에서 받아 `NetworkManager.StartClient()`로 접속 → 유니티 서버의 `IngameServerInstance`가 `OnConnectionApproval`에서 페이로드(`playerId|token|ticket`)를 파싱해 `GameServerHandler.HandleApprovalRequestAsync`에 검증 위임(토큰 대조 `TokenVerification.IsValid` + 소유 전환이면 `IngameAgentMainServerIntermediary.TryConsume`) → 승인되면 `RoomManager.RegisterConnectedClient`.
+
+**발생 가능한 이벤트와 대응**:
+- **`RequestMatch` 스트림이 매칭 대기 중 끊김** — `context.CancellationToken.IsCancellationRequested`를 `finally`에서 감지, `RequestLeaveMatchAsync`로 매칭 서버 대기열에서 즉시 제거. **재접속 시 대기열 자리를 이어서 복원하는 기능은 없음**(TODO.md "로비의 재접속(재개) 개념 부재" 참고) - 다시 처음부터 대기열에 진입해야 함.
+- **훔친 영구 토큰으로 진짜 클라보다 먼저 인게임 서버에 도착 시도** — `IngameAgentMainServerIntermediary.TryConsume`이 원자적으로 1회만 통과시키므로, 먼저 온 쪽이 통과하면 진짜 클라는 이미 소비된 티켓으로 거부됨(`INVALID_TRANSFER_TICKET`). 재접속(이미 이 게임 에이전트가 소유자였던 경우)은 애초에 티켓 검증 대상이 아님(`session.OwnerServerType == Lobby`일 때만 검증).
+- **재접속 가능한 방(`GetAllowReconnect(gameType)`이 true)에서 클라가 순간적으로 끊김** — `GameServerHandler.HandlePlayerLeftAsync`가 소유권/세션을 그대로 두고(`RoomManager`의 방-플레이어 매핑도 유지), 클라가 재접속하면 위 정상 흐름과 같은 `ConnectionApproval` 경로로 그대로 복귀.
+- **재접속 불가능한 방에서 클라가 끊김** — `HandlePlayerLeftAsync`가 소유권을 즉시 놓음(`OwnerServerId = ""`, `OwnerServerType = Unspecified`). 클라가 재접속을 시도하면 로그인 서버로 가야 하는데, **이 경로가 지금 막혀있음** - 아래 "로그인 서버 재진입" 참고.
+
+### 인게임 → 로비 전환
+
+**정상 흐름**: 게임 종료(`HandleMatchResultAsync`, 유니티가 보낸 `MatchResult`) 또는 방-채움 타임아웃(`RoomTimeout`) → `GameServerHandler.CloseRoomAndRedirectAsync` → `RequestLobbyAddressAsync`(매칭 서버한테 로비 주소 요청) → `IngameAgentMainServerIntermediary.IssueAndNotifyAsync`(전입 티켓 발급 + 로비의 `LobbyControlService.RegisterIncomingTransfers`에 미리 등록) → 세션을 `Moving`+`OwnerServerType.Lobby`로 갱신 → `CloseRoom`(티켓 포함 `PlayerRedirect`)을 유니티한테 전송 → `IngameServerInstance.OnCloseRoomReceived`가 대상 목록을 먼저 확정한 뒤 `RoomManager.CloseRoom`으로 매핑 정리 → `SendRoomClosedAndWaitAckAsync`로 클라한테 주소+티켓 전송, 확인 응답 대기 → `ClientInstance.OnRoomClosedMessageReceived`가 받아서 `_pendingTransferTicket`에 저장 → `ReconnectToLobbyAsync` → `LobbyClient.EnterLobbyAsync(ticket)` → `LobbyControlService.EnterLobby`가 토큰(`TokenVerification.IsValid`) + 전입 티켓(`session.OwnerServerType == Ingame`일 때만 `LobbyMainServerIntermediary.TryConsume`) 검증.
+
+**발생 가능한 이벤트와 대응**:
+- **`RoomClosed` 확인 응답이 안 옴(클라가 이미 끊김)** — `SendRoomClosedAndWaitAckAsync`가 `RoomClosedAckTimeout`(최대 5초) 뒤 그냥 진행, 어차피 방은 정리돼야 하므로.
+- **확인 응답 대기 중 클라가 다른 이유로 먼저 끊김** — `IngameServerInstance.OnClientDisconnected`가 `RoomManager.GetRoomIdForPlayer`로 "이미 정리된 방(`RoomManager.CloseRoom`이 먼저 실행됨)"인지 확인, 맞으면 `PlayerLeft`를 게임 에이전트한테 아예 안 보냄(정상 종료로 인한 예상된 이탈이라는 걸 유니티가 로컬에서 이미 알고 있으므로 - 프로세스 경계를 안 넘음). 이 판정이 어긋나면(옛 버전) 게임 에이전트가 방금 정상적으로 이관한 세션을 "예기치 못한 이탈"로 오인해 덮어쓰는 버그가 있었음 - `KNOWN_ISSUES.md` 참고.
+- **`RoomClosed` 메시지 자체를 클라가 못 받음(네트워크 완전 단절)** — 서버 쪽(세션, 티켓 등록)은 정리가 다 끝났는데 클라만 갈 곳을 모르는 상태로 남음. 클라가 로그인 서버로 재진입을 시도할 수밖에 없는데, **이 경로가 지금 막혀있음** - 아래 참고.
+
+### 로그인 서버 = 갈 곳을 잃은 클라를 위한 안정적 단일 조회 창구 - 설계 확정, 구현 전
+
+**지금 동작**: `LoginConnectionHandler`가 `TryClaimOwnershipWithPreviousOwnerAsync`로 소유권 클레임을 시도하는데, 이미 살아있는 소유자(위에서 언급한 두 경우처럼 로비/인게임이 이미 세션을 정리해둔 상태)가 있으면 그냥 `SESSION_CONFLICT`로 거부한다. 클라 입장에선 "재접속 시도했는데 이유 모를 거부"만 받는다.
+
+**설계 참고 사례**: AWS GameLift의 서버리스 매치메이킹 구조 - 클라는 특정 서버 주소를 직접 캐시/재시도하지 않고, 항상 안정적인 단일 창구(API Gateway)한테 "지금 상태 뭐야"를 물어본다. 그 창구가 내부적으로 상태 저장소(DynamoDB)를 조회해서 알려주는 구조. 우리 시스템에서 "안정적 단일 창구" 역할이 **로그인 서버**, "내부 상태 저장소" 역할이 **세션 레지스트리(Redis)**에 대응한다.
+
+**확정된 흐름**:
+1. 클라 접속이 끊김.
+2. **재접속 가능한 방에서 순간적으로 끊긴 경우만 예외** - 기존에 갖고 있던 인게임 주소로 직접 재시도(빠른 경로, 위 "로비 → 인게임 전환"에 이미 있는 `ConnectionApproval` 토큰 대조 복귀 메커니즘 그대로).
+3. 그 외 모든 경우(로비는 재접속 개념 자체가 없음 / 재접속 불가능한 방 / 2번 시도가 접속 거부로 실패) → 클라가 로그인 서버한테 `playerId` + 세션 토큰(계정 자격증명 재인증 아님)을 제출.
+4. 로그인 서버가 세션 레지스트리 조회 - 살아있는 소유자가 있으면(`OwnerServerId` + 그 서버의 하트비트 TTL) 토큰 대조 후 그 주소로 안내만 함(소유권 자체는 안 건드림). 소유자가 없으면 완전히 새로 시작(기존 로직 그대로).
+5. "목적지 서버가 죽었다"는 판단은 클라가 직접 접속 시도 실패로 알게 되는 것 - 로그인 서버가 능동적으로 감지해서 push하는 게 아니라, 다음 조회 시점에 하트비트 TTL이 자연스럽게 만료된 걸 보고 판단.
+
+**번외 - "대참사" 시나리오(이동 중 도착지 서버가 죽거나 회전 토큰 2개 다 만료)**: 클라가 접속 거부당해 로그인 서버로 가도, 세션 레지스트리가 아직 그 서버를 "살아있다"고 보고 있을 수 있어(하트비트 TTL 만료 전) 새로 로그인해야 하는 상황이 될 수 있다. **이 경우 클라가 자동으로 즉시 재시도하는 게 오히려 안 좋다는 결론** - 서버 죽음은 TTL이 자연 만료될 시간이 필요하고, 토큰 2개 다 만료는 서버가 바쁘다는 신호라 즉시 재접속 폭주가 부하를 더 키운다. **자동 복구 로직 없이 "연결이 끊겼습니다"만 띄우고 사람이 직접 재시도하게 두는 게 나음** - 사람이 누르기까지의 지연이 TTL 만료 시간도 벌어주고 서버 부하도 자연스럽게 완화시킴. 아직 구현 전.
 
 ---
 

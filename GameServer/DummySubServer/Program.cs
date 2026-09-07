@@ -1,4 +1,5 @@
 using DummySubServer;
+using Shared.Common.Account;
 using GameServer.Common;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
@@ -33,7 +34,12 @@ builder.Services.AddSessionRegistry();
 builder.Services.AddHostedService<ServerHeartbeatService>();
 
 // 우편 지급 + 소유 서버 알림 - 여러 컨슈머가 공유
-builder.Services.AddSingleton<MailGranter>();
+builder.Services.AddSingleton<SubServerAccountServerIntermediary>();
+// RemoteMailNotifier는 추상 타입(AccountServerIntermediary)을 요구하는데, 구체 타입
+// 등록만으로는 DI가 자동으로 안 이어준다 - 명시적으로 매핑해줘야 함.
+builder.Services.AddSingleton<AccountServerIntermediary>(sp =>
+    sp.GetRequiredService<SubServerAccountServerIntermediary>());
+builder.Services.AddSingleton<RemoteMailNotifier>();
 
 // Kafka 컨슈머 설정
 builder.Services.Configure<KafkaConsumerOptions>(options =>

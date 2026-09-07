@@ -234,6 +234,37 @@ internal sealed class ConnectionHandler
             }
         }
 
+        // 채팅 서버도 계정 서버/매칭 서버와 완전히 같은 패턴 - 실제로는 로그인 서버만
+        // 이 주소를 쓴다(로그인 성공 응답에 실어서 클라에 전달). 순서 걱정 없이 양방향
+        // (신규 등록 시 브로드캐스트 + 기존 등록자 찾아서 캐치업)으로 처리하므로,
+        // 로그인 서버/채팅 서버가 어느 순서로 뜨든 문제없다.
+        if (status.ServerType == ServerType.Chat)
+        {
+            BroadcastChatServerAddress(status.InstanceId, status.Address);
+        }
+        else
+        {
+            var chatServer = _registry.GetByType(ServerType.Chat).FirstOrDefault();
+            if (chatServer != null)
+            {
+                _registry.Enqueue(status.InstanceId, new MasterMessage
+                {
+                    ChatServer = new ChatServerInfo { Address = chatServer.Address },
+                });
+
+                _logger.LogInformation(
+                    "채팅 서버 주소 전달: {InstanceId} ← {ChatAddress}",
+                    status.InstanceId, chatServer.Address);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "메인 서버 접속({InstanceId})했으나 채팅 서버가 아직 등록되지 않음. " +
+                    "로그인 서버라면 기동 순서를 확인하세요.",
+                    status.InstanceId);
+            }
+        }
+
         // 세션 레지스트리(Redis) 주소는 마스터가 자체 설정(shared.appsettings.json)에서
         // 정적으로 알고 있으므로, 매칭 서버와 달리 등록 순서와 무관하게 항상 바로 전달한다.
         // 매칭 서버 자신도 ISessionRegistry를 쓰므로 타입 구분 없이 전달한다.
@@ -293,6 +324,28 @@ internal sealed class ConnectionHandler
         _logger.LogInformation(
             "계정 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
             accountInstanceId, accountAddress, recipients.Count);
+    }
+
+    /// <summary>매칭 서버와 같은 이유로 존재하는 채팅 서버 버전. BroadcastMatchingServerAddress 참고.</summary>
+    private void BroadcastChatServerAddress(string chatInstanceId, string chatAddress)
+    {
+        var message = new MasterMessage
+        {
+            ChatServer = new ChatServerInfo { Address = chatAddress },
+        };
+
+        var recipients = _registry.GetAll()
+            .Where(i => i.ServerType != ServerType.Chat)
+            .ToList();
+
+        foreach (var instance in recipients)
+        {
+            _registry.Enqueue(instance.InstanceId, message);
+        }
+
+        _logger.LogInformation(
+            "채팅 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
+            chatInstanceId, chatAddress, recipients.Count);
     }
 
     private async Task SendLoopAsync(

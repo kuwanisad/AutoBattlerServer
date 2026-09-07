@@ -48,6 +48,7 @@ builder.Services.AddSingleton<ChatRedisConnection>();
 builder.Services.AddSingleton<IChatRoomStore, RedisChatRoomStore>();
 builder.Services.AddSingleton<IChatMessageStore, RedisChatMessageStore>();
 builder.Services.AddSingleton<IChatFilter, DummyChatFilter>();
+builder.Services.AddSingleton<ChatAccountServerIntermediary>();
 builder.Services.AddSingleton<WebSocketHandler>();
 
 // gRPC (마스터 서버와 통신)

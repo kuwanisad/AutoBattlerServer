@@ -53,4 +53,13 @@ public sealed class IngameControlService : IngameControl.IngameControlBase
         var success = await _handler.NotifyMailUpdatedAsync(request.PlayerId);
         return new NotifyMailUpdatedResponse { Success = success };
     }
+
+    /// <summary>로비가 "이 플레이어들이 곧 이 게임 에이전트로 올 것"이라며 일회용 임시
+    /// 티켓을 미리 등록한다 - 서버 간 통신이라 플레이어 토큰 인증 대상이 아니다.</summary>
+    public override Task<RegisterIncomingTransfersResponse> RegisterIncomingTransfers(
+        RegisterIncomingTransfersRequest request, ServerCallContext context)
+    {
+        _handler.RegisterIncomingTransfers(request.Tickets.Select(t => (t.PlayerId, t.Ticket)));
+        return Task.FromResult(new RegisterIncomingTransfersResponse { Success = true });
+    }
 }

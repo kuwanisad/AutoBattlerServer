@@ -23,6 +23,10 @@ service IngameControl {
   // 다름). 게임 에이전트는 게임 서버 하나랑만 붙는 사이드카 구조라 "여러 연결 중에
   // 찾기"는 필요 없다.
   rpc NotifyMailUpdated(NotifyMailUpdatedRequest) returns (NotifyMailUpdatedResponse);
+
+  // 상대 서버(로비)가 "이 플레이어들이 곧 인게임으로 올 것"이라며 일회용 임시 티켓을
+  // 미리 등록한다 - 로비의 RegisterIncomingTransfers와 대칭.
+  rpc RegisterIncomingTransfers(RegisterIncomingTransfersRequest) returns (RegisterIncomingTransfersResponse);
 }
 
 message NotifyMailUpdatedRequest {
@@ -31,6 +35,19 @@ message NotifyMailUpdatedRequest {
 
 message NotifyMailUpdatedResponse {
   bool success = 1; // 그 클라가 지금 이 게임 에이전트 관할에 접속 중이어서 릴레이했는지
+}
+
+message RegisterIncomingTransfersRequest {
+  repeated PlayerTicket tickets = 1;
+}
+
+message PlayerTicket {
+  string player_id = 1;
+  string ticket = 2;
+}
+
+message RegisterIncomingTransfersResponse {
+  bool success = 1;
 }
 
 // === 게임 서버 → 게임 에이전트 ===
@@ -47,6 +64,7 @@ message GameServerMessage {
     ApprovalRequest approval_request = 8;           // ConnectionApproval 검증 요청
     RoomTimeout room_timeout = 9;                   // 방-채움 타임아웃 - 자체 감지한 결원 보고
     FriendCommandRequest friend_command = 10;       // 인게임 중 친구 관리 명령어 릴레이
+    GetMailListRequest get_mail_list = 11;           // 인게임 중 클라의 능동적 우편함 조회 요청
   }
 }
 
@@ -112,6 +130,7 @@ message ApprovalRequest {
   string player_id = 2;     // 클라이언트가 주장하는 플레이어 ID
   string token = 3;         // 클라가 마지막으로 받은 토큰 - 세션의 CurrentToken/PreviousToken과
                              // 대조해서 진짜 본인인지 검증하는 데 쓴다 (TokenVerification 참고)
+  string transfer_ticket = 4; // 로비→인게임 이동 시 발급된 일회용 임시 티켓 (KNOWN_ISSUES.md 참고)
 }
 
 // 인게임 중 클라가 친구 관리(조회/추가/삭제)를 명령어로 요청하면, 인게임 서버가 이걸로
@@ -141,6 +160,14 @@ message AddFriendCommand {
 
 message RemoveFriendCommand {
   string friend_player_id = 1;
+}
+
+// 응답은 별도 타입 없이 이미 있는 GameAgentMessage.MailProvided를 그대로 재사용한다 -
+// 접속 시 자동 제공/하위 서버 신호 즉시 제공과 완전히 같은 응답 모양이라 새로 만들
+// 필요가 없다.
+message GetMailListRequest {
+  uint64 client_id = 1;   // 어느 NGO 클라이언트의 요청인지
+  string player_id = 2;   // 인게임 서버가 검증해서 채운 값(클라 자체 신고 신뢰 안 함)
 }
 
 // === 게임 에이전트 → 게임 서버 ===
@@ -203,6 +230,7 @@ message CloseRoom {
 message PlayerRedirect {
   string player_id = 1;
   string lobby_address = 2;
+  string transfer_ticket = 3; // EnterLobby 제출용 일회용 임시 티켓
 }
 
 // 인게임 서버가 방을 열었는데 일정 시간 안에 ExpectedPlayerIds 전원이 접속하지 않으면

@@ -13,7 +13,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="Protos\login.proto" GrpcServices="Both" />
+    <ProjectReference Include="..\Common.Contracts\Common.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos\login.proto" GrpcServices="Both">
+      <AdditionalImportDirs>..\Common.Contracts\Protos</AdditionalImportDirs>
+    </Protobuf>
   </ItemGroup>
 
   <Target Name="CopyGeneratedToUnity" AfterTargets="Build">

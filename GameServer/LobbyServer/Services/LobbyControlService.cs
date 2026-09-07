@@ -28,11 +28,10 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     private static readonly TimeSpan EnterLobbyRateLimitWindow = TimeSpan.FromMilliseconds(300);
 
     private readonly ITokenProvider _tokenProvider;
-
-    // playerId → StayConnected 채널. NotifyMailUpdated 등 다른 요청 핸들러가 이미 열려
-    // 있는 StayConnected 스트림에 뭔가를 push해야 할 때 이걸 통해서만 쓴다(직접 스트림에
-    // 안 씀 - 동시 쓰기 방지).
-    private readonly ConcurrentDictionary<string, System.Threading.Channels.Channel<StayConnectedEvent>> _stayConnectedChannels = new();
+    private readonly LobbyConnectionRegistry _connectionRegistry;
+    private readonly LobbyAccountServerIntermediary _accountServer;
+    private readonly LobbyMailDeliverer _mailDeliverer;
+    private readonly LobbyMainServerIntermediary _mainServerIntermediary;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly IRateLimiter _rateLimiter;
     private readonly MasterConnectionService _masterConnection;
@@ -42,6 +41,10 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 
     public LobbyControlService(
         ITokenProvider tokenProvider,
+        LobbyConnectionRegistry connectionRegistry,
+        LobbyAccountServerIntermediary accountServer,
+        LobbyMailDeliverer mailDeliverer,
+        LobbyMainServerIntermediary mainServerIntermediary,
         ISessionRegistry sessionRegistry,
         IRateLimiter rateLimiter,
         MasterConnectionService masterConnection,
@@ -50,6 +53,10 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
+        _connectionRegistry = connectionRegistry;
+        _accountServer = accountServer;
+        _mailDeliverer = mailDeliverer;
+        _mainServerIntermediary = mainServerIntermediary;
         _sessionRegistry = sessionRegistry;
         _rateLimiter = rateLimiter;
         _masterConnection = masterConnection;
@@ -61,12 +68,19 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     public override async Task<LogoutResponse> Logout(LogoutRequest request, ServerCallContext context)
     {
         var playerId = context.UserState["playerId"] as string;
+        var submittedToken = context.UserState["token"] as string ?? string.Empty;
         _logger.LogInformation("로그아웃: {PlayerId}", playerId);
 
         if (!string.IsNullOrEmpty(playerId))
         {
-            await _sessionRegistry.RemoveAsync(playerId);
-            PublishSessionInvalidated(playerId);
+            // 이 로비가 실제 소유자일 때만 지운다 - 아니면 다른 로비가 소유한 세션을
+            // 엉뚱한 로비가 지워버리는 사고가 생길 수 있다(KNOWN_ISSUES.md 참고).
+            var session = await GetOwnedSessionOrNullAsync(playerId, submittedToken);
+            if (session != null)
+            {
+                await _sessionRegistry.RemoveAsync(playerId);
+                PublishSessionInvalidated(playerId);
+            }
         }
 
         return new LogoutResponse { Success = true };
@@ -135,6 +149,20 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             return new EnterLobbyResponse { Success = false, ErrorMessage = "INVALID_TOKEN" };
         }
 
+        // 인게임에서 돌아오는 전환이면 일회용 임시 티켓도 검증한다 - 훔친 영구 토큰으로
+        // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 로그인 서버발
+        // 최초 진입 등 다른 경로는 애초에 이 로비한테 미리 등록된 티켓이 없으므로
+        // 대상이 아니다 - existing.OwnerServerType으로 구분한다(단순히 필드를 비워서
+        // 우회할 수 없음 - Ingame 소유였으면 반드시 TryConsume을 통과해야 함).
+        if (existing != null && existing.OwnerServerType == GameServer.Common.ServerType.Ingame)
+        {
+            if (!_mainServerIntermediary.TryConsume(playerId, request.TransferTicket))
+            {
+                _logger.LogWarning("전입 티켓 불일치/만료로 로비 입장 거부: {PlayerId}", playerId);
+                return new EnterLobbyResponse { Success = false, ErrorMessage = "INVALID_TRANSFER_TICKET" };
+            }
+        }
+
         var newToken = _tokenProvider.GenerateToken(playerId);
 
         var newSession = new PlayerSession
@@ -186,13 +214,13 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         if (string.IsNullOrEmpty(playerId)) return;
 
         var channel = System.Threading.Channels.Channel.CreateUnbounded<StayConnectedEvent>();
-        _stayConnectedChannels[playerId] = channel;
+        _connectionRegistry.Register(playerId, channel);
 
         try
         {
             // 접속 시 자동 제공(안전망) - 신호를 기다리지 않고 여기서 곧장 한 번 조회.
             // 신호(NotifyMailUpdated)가 어떤 이유로든 못 오더라도 이걸로 항상 만회된다.
-            await ProvideMailAsync(playerId, channel.Writer);
+            await _mailDeliverer.DeliverAsync(playerId);
 
             var sendLoopTask = Task.Run(async () =>
             {
@@ -212,69 +240,63 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             }
 
             channel.Writer.TryComplete();
-            await sendLoopTask;
+
+            try
+            {
+                await sendLoopTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // 정상 - sendLoopTask 내부의 ReadAllAsync도 같은 context.CancellationToken을
+                // 쓰기 때문에, channel.Writer.TryComplete()보다 먼저(또는 거의 동시에)
+                // 취소로 끝날 수 있다. 이것도 위와 같은 "정상 종료" 경로이므로 그냥 삼킨다 -
+                // 안 잡으면 gRPC 프레임워크가 매번 실패로 로그를 찍는다(실질적 피해는 없었지만
+                // 시끄러운 로그가 진짜 에러랑 구분이 안 되게 만듦).
+            }
         }
         finally
         {
-            _stayConnectedChannels.TryRemove(playerId, out _);
+            _connectionRegistry.Unregister(playerId);
             await HandleStayConnectedEndedAsync(playerId);
         }
     }
 
     /// <summary>
-    /// 하위 서버가 "이 플레이어 우편함이 갱신됐다"는 신호를 보내면, 지금 이 로비에
-    /// 접속 중일 때만(StayConnected 채널이 있을 때만) AccountServer에서 최신 목록을
-    /// 조회해서 그 채널에 넣는다. 접속 중이 아니면 그냥 success=false - 하위 서버
-    /// 입장에서는 실패로 취급 안 해도 된다(다음 접속 시 자동 제공이 안전망).
+    /// 하위 서버(또는 다른 메인 서버)가 "이 플레이어 우편함이 갱신됐다"는 신호를 보내면,
+    /// 지금 이 로비에 접속 중일 때만(연결 레지스트리에 있을 때만) 최신 목록을 다시
+    /// 조회해서 전달한다. 접속 중이 아니면 그냥 success=false - 호출부 입장에서는
+    /// 실패로 취급 안 해도 된다(다음 접속 시 자동 제공이 안전망).
     /// </summary>
     public override async Task<NotifyMailUpdatedResponse> NotifyMailUpdated(
         NotifyMailUpdatedRequest request, ServerCallContext context)
     {
-        if (!_stayConnectedChannels.TryGetValue(request.PlayerId, out var channel))
+        if (!_connectionRegistry.TryGet(request.PlayerId, out _))
         {
             return new NotifyMailUpdatedResponse { Success = false };
         }
 
-        await ProvideMailAsync(request.PlayerId, channel.Writer);
+        await _mailDeliverer.DeliverAsync(request.PlayerId);
         return new NotifyMailUpdatedResponse { Success = true };
     }
 
-    /// <summary>AccountServer한테 최신 우편함을 조회해서 StayConnected 채널에 넣는다.
-    /// 접속 시 자동 제공과 신호 수신 시 즉시 제공, 둘 다 이 메서드 하나로 통일한다.</summary>
-    private async Task ProvideMailAsync(string playerId, System.Threading.Channels.ChannelWriter<StayConnectedEvent> writer)
+    /// <summary>클라가 능동적으로 최신 우편함을 요청할 때(새로고침 등) 직접 호출한다.</summary>
+    public override async Task<MailProvided> GetMailList(GetMailListRequest request, ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogWarning("계정 서버 주소 없음 - 우편함 제공 불가: {PlayerId}", playerId);
-            return;
-        }
+        var playerId = context.UserState["playerId"] as string;
+        if (string.IsNullOrEmpty(playerId)) return new MailProvided();
 
-        try
-        {
-            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-            var response = await client.GetMailListAsync(new AccountServer.GetMailListRequest { PlayerId = playerId });
+        return await _mailDeliverer.DeliverAsync(playerId);
+    }
 
-            var mailProvided = new MailProvided();
-            foreach (var m in response.Mails)
-            {
-                mailProvided.Mails.Add(new MailInfo
-                {
-                    MailId = m.MailId,
-                    MailType = m.MailType,
-                    DisplayContent = m.DisplayContent,
-                    CreatedAtUnixMs = m.CreatedAtUnixMs,
-                    ExpiresAtUnixMs = m.ExpiresAtUnixMs,
-                    Claimed = m.Claimed,
-                });
-            }
-
-            writer.TryWrite(new StayConnectedEvent { MailProvided = mailProvided });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "우편함 제공 실패: {PlayerId}", playerId);
-        }
+    /// <summary>게임 에이전트가 "이 플레이어들이 곧 이 로비로 올 것"이라며 일회용 임시
+    /// 티켓을 미리 등록한다 - 플레이어 토큰이 아니라 서버 간 통신이라 AuthInterceptor의
+    /// ServerToServerMethods 예외 목록에 등록돼 있다.</summary>
+    public override Task<RegisterIncomingTransfersResponse> RegisterIncomingTransfers(
+        RegisterIncomingTransfersRequest request, ServerCallContext context)
+    {
+        _mainServerIntermediary.OnRegisterIncomingTransfersReceived(
+            request.Tickets.Select(t => (t.PlayerId, t.Ticket)));
+        return Task.FromResult(new RegisterIncomingTransfersResponse { Success = true });
     }
 
     /// <summary>
@@ -311,6 +333,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         ServerCallContext context)
     {
         var playerId = context.UserState["playerId"] as string;
+        var submittedToken = context.UserState["token"] as string ?? string.Empty;
         if (string.IsNullOrEmpty(playerId))
         {
             await responseStream.WriteAsync(new MatchEvent
@@ -322,13 +345,20 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 
         _logger.LogInformation("매치메이킹 요청: {PlayerId}", playerId);
 
-        // 세션 Matching으로 업데이트
-        var session = await _sessionRegistry.GetAsync(playerId);
-        if (session != null)
+        // 이 로비가 실제 소유자일 때만 매칭을 시작한다 - 아니면 소유권 이전 없이
+        // 엉뚱한 로비가 세션을 조작할 수 있다(KNOWN_ISSUES.md 참고).
+        var session = await GetOwnedSessionOrNullAsync(playerId, submittedToken);
+        if (session == null)
         {
-            session.Status = PlayerStatus.Matching;
-            await _sessionRegistry.UpdateAsync(playerId, session);
+            await responseStream.WriteAsync(new MatchEvent
+            {
+                MatchFailed = new MatchFailed { Reason = "이 서버 소속이 아닙니다." },
+            });
+            return;
         }
+
+        session.Status = PlayerStatus.Matching;
+        await _sessionRegistry.UpdateAsync(playerId, session);
 
         // 매칭 서버에 JoinMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김)
         if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
@@ -380,6 +410,33 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         }
     }
 
+    /// <summary>
+    /// 이 세션의 진짜 소유자가 지금 이 로비(자기 자신)인지 + 제출된 토큰이 지금도
+    /// 유효한지(세션의 CurrentToken/PreviousToken과 대조) 둘 다 확인한다. EnterLobby/
+    /// ConnectionApproval처럼 "소유권을 새로 클레임하는" 지점과 다르게, 여기서
+    /// 확인하는 RPC들(RequestMatch/CancelMatch/Logout)은 "이미 소유하고 있다고
+    /// 가정하고 그냥 세션을 쓰는" 지점이라, 그 가정 자체를 매번 확인해야 한다.
+    ///
+    /// 토큰 대조가 왜 별도로 필요한가: AuthInterceptor.ValidateToken은 토큰 문자열의
+    /// 형식만 확인할 뿐 세션과 실제로 대조하지 않는다(KNOWN_ISSUES.md 참고) - 그러니
+    /// 이미 회전으로 무효화됐어야 할 옛 토큰도 형식만 맞으면 AuthInterceptor를 그냥
+    /// 통과한다. 소유권 확인만으로는 이 경우(진짜 소유 로비가 맞지만, 제출된 토큰
+    /// 자체는 이미 낡은 경우)를 못 걸러내므로, 여기서 TokenVerification까지 같이 확인한다.
+    /// </summary>
+    private async Task<PlayerSession?> GetOwnedSessionOrNullAsync(string playerId, string submittedToken)
+    {
+        var session = await _sessionRegistry.GetAsync(playerId);
+        if (session == null || session.OwnerServerId != _masterConnection.InstanceId)
+        {
+            return null;
+        }
+        if (!TokenVerification.IsValid(session, submittedToken))
+        {
+            return null;
+        }
+        return session;
+    }
+
     /// <summary>매칭 서버에 LeaveMatch를 요청한다. CancelMatch와 접속 끊김 자동 처리 양쪽에서 쓴다.</summary>
     private async Task RequestLeaveMatchAsync(string playerId)
     {
@@ -404,14 +461,15 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     public override async Task<CancelMatchResponse> CancelMatch(CancelMatchRequest request, ServerCallContext context)
     {
         var playerId = context.UserState["playerId"] as string;
+        var submittedToken = context.UserState["token"] as string ?? string.Empty;
         _logger.LogInformation("매치메이킹 취소: {PlayerId}", playerId);
 
         if (!string.IsNullOrEmpty(playerId))
         {
             await RequestLeaveMatchAsync(playerId);
 
-            // 세션 Lobby로 복원
-            var session = await _sessionRegistry.GetAsync(playerId);
+            // 이 로비가 실제 소유자일 때만 세션을 복원한다(KNOWN_ISSUES.md 참고).
+            var session = await GetOwnedSessionOrNullAsync(playerId, submittedToken);
             if (session != null)
             {
                 session.Status = PlayerStatus.Lobby;
@@ -437,18 +495,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var playerId = context.UserState["playerId"] as string;
         if (string.IsNullOrEmpty(playerId)) return new GetFriendsResponse();
 
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogWarning("계정 서버 주소 없음 - GetFriends 실패: {PlayerId}", playerId);
-            return new GetFriendsResponse();
-        }
-
         try
         {
-            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-            var response = await client.GetFriendsAsync(new AccountServer.GetFriendsRequest { PlayerId = playerId });
-
+            var response = await _accountServer.GetFriendsAsync(playerId);
             var result = new GetFriendsResponse();
             result.FriendPlayerIds.AddRange(response.FriendPlayerIds);
             return result;
@@ -468,21 +517,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             return new AddFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
         }
 
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            return new AddFriendResponse { Success = false, ErrorMessage = "계정 서버 연결 안 됨" };
-        }
-
         try
         {
-            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-            var response = await client.AddFriendAsync(new AccountServer.AddFriendRequest
-            {
-                PlayerId = playerId,
-                FriendPlayerId = request.FriendPlayerId,
-            });
-
+            var response = await _accountServer.AddFriendAsync(playerId, request.FriendPlayerId);
             return new AddFriendResponse { Success = response.Success, ErrorMessage = response.ErrorMessage };
         }
         catch (Exception ex)
@@ -500,20 +537,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             return new RemoveFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
         }
 
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            return new RemoveFriendResponse { Success = false, ErrorMessage = "계정 서버 연결 안 됨" };
-        }
-
         try
         {
-            using var channel = CreateAccountServerChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountServer.AccountControl.AccountControlClient(channel);
-            var response = await client.RemoveFriendAsync(new AccountServer.RemoveFriendRequest
-            {
-                PlayerId = playerId,
-                FriendPlayerId = request.FriendPlayerId,
-            });
+            var response = await _accountServer.RemoveFriendAsync(playerId, request.FriendPlayerId);
 
             // 채팅 서버 통보는 AccountServer가 트랜잭션 아웃박스로 직접 처리한다
             // (FriendEventOutbox → RabbitMQ → ChatServer.FriendRemovedSubscriber) -
@@ -525,28 +551,5 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             _logger.LogWarning(ex, "RemoveFriend 요청 실패: {PlayerId}", playerId);
             return new RemoveFriendResponse { Success = false, ErrorMessage = "일시적인 오류입니다." };
         }
-    }
-
-    /// <summary>
-    /// AccountServer 호출 시 SocketsHttpHandler를 명시적으로 구성한다 - 예전에 이걸
-    /// 생략한 bare GrpcChannel.ForAddress로 AccountServer를 호출했을 때 원인 불명의
-    /// "HTTP_1_1_REQUIRED" 오류가 재현된 적이 있어서(LoginConnectionHandler에서 발견),
-    /// 검증된 이 패턴을 그대로 재사용한다.
-    /// </summary>
-    private static GrpcChannel CreateAccountServerChannel(string address)
-    {
-        var handler = new System.Net.Http.SocketsHttpHandler
-        {
-            EnableMultipleHttp2Connections = true,
-            KeepAlivePingDelay = TimeSpan.FromSeconds(10),
-            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
-            KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests,
-        };
-
-        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
-        {
-            HttpHandler = handler,
-            DisposeHttpClient = true,
-        });
     }
 }

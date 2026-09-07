@@ -49,6 +49,15 @@ service LobbyControl {
   // "실패"로 취급 안 해도 된다(다음 접속 시 자동 제공이 안전망이므로).
   rpc NotifyMailUpdated(NotifyMailUpdatedRequest) returns (NotifyMailUpdatedResponse);
 
+  // 클라가 능동적으로 최신 우편함을 요청한다(새로고침 등). 응답은 StayConnected로
+  // push되는 것과 같은 MailProvided를 그대로 재사용한다.
+  rpc GetMailList(GetMailListRequest) returns (MailProvided);
+
+  // 상대 서버(게임 에이전트)가 "이 플레이어들이 곧 로비로 올 것"이라며 일회용 임시
+  // 티켓을 미리 등록한다 - 훔친 영구 토큰으로 진짜 클라보다 먼저 도착하는 걸 막기 위함
+  // (KNOWN_ISSUES.md 참고).
+  rpc RegisterIncomingTransfers(RegisterIncomingTransfersRequest) returns (RegisterIncomingTransfersResponse);
+
   // === 매치메이킹 ===
   // 매치 요청 후 서버가 상태 업데이트를 스트림으로 밀어준다.
   // 매치 확정 시 MatchEvent.match_found를 마지막으로 스트림이 닫힌다.
@@ -72,7 +81,12 @@ message LogoutResponse {
   bool success = 1;
 }
 
-message EnterLobbyRequest {}
+message EnterLobbyRequest {
+  // 서버 이동 시 발급된 일회용 임시 티켓. 최초 로그인 직후 첫 EnterLobby는 티켓 없이
+  // 온다(로그인 서버가 이관하는 경우 - 아직 이 메커니즘 대상이 아님). 인게임에서
+  // 돌아오는 경우에만 채워져 있고, 검증 대상이 된다.
+  string transfer_ticket = 1;
+}
 
 message StayConnectedRequest {}
 
@@ -90,6 +104,22 @@ message NotifyMailUpdatedRequest {
 
 message NotifyMailUpdatedResponse {
   bool success = 1; // 그 클라가 지금 이 로비에 접속 중이어서 신호를 실제로 전달했는지
+}
+
+// playerId는 인증 컨텍스트(토큰)에서 가져온다 - GetFriends 등과 같은 패턴.
+message GetMailListRequest {}
+
+message RegisterIncomingTransfersRequest {
+  repeated PlayerTicket tickets = 1;
+}
+
+message PlayerTicket {
+  string player_id = 1;
+  string ticket = 2;
+}
+
+message RegisterIncomingTransfersResponse {
+  bool success = 1;
 }
 
 // account.proto의 MailSummary와 필드가 같아야 한다(JSON이 아니라 gRPC라 타입을 그대로
@@ -156,6 +186,7 @@ message MatchFound {
   repeated string player_ids = 3;   // 같은 매치의 플레이어 목록
   string ingame_server_id = 4;      // OwnerServerId 설정에 사용
   int64 timestamp_unix_ms = 5;
+  string transfer_ticket = 6;       // ConnectionApproval 제출용 일회용 임시 티켓
 }
 
 message MatchFailed {

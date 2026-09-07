@@ -44,6 +44,10 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 builder.Services.AddSingleton<ITokenProvider, DummyTokenProvider>();
 
 // GameServerHandler - 게임 서버 연결 처리
+// 우편함 - AccountServerIntermediary 서브클래스 + 직접 대상 전달 클래스.
+builder.Services.AddSingleton<IngameAccountServerIntermediary>();
+builder.Services.AddSingleton<IngameMailDeliverer>();
+builder.Services.AddSingleton<IngameAgentMainServerIntermediary>();
 builder.Services.AddSingleton<GameServerHandler>();
 builder.Services.AddScoped<IngameControlService>();
 builder.Services.AddScoped<IngameMatchService>();

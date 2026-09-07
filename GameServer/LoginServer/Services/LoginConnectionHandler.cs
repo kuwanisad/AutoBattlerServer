@@ -34,17 +34,20 @@ internal sealed class LoginConnectionHandler
     private readonly MasterConnectionService _masterConnection;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ITokenProvider _tokenProvider;
+    private readonly LoginAccountServerIntermediary _accountServer;
     private readonly ILogger _logger;
 
     internal LoginConnectionHandler(
         MasterConnectionService masterConnection,
         ISessionRegistry sessionRegistry,
         ITokenProvider tokenProvider,
+        LoginAccountServerIntermediary accountServer,
         ILogger logger)
     {
         _masterConnection = masterConnection;
         _sessionRegistry = sessionRegistry;
         _tokenProvider = tokenProvider;
+        _accountServer = accountServer;
         _logger = logger;
     }
 
@@ -79,9 +82,15 @@ internal sealed class LoginConnectionHandler
             return; // 클라가 연결 자체를 끊음
         }
 
+        if (requestStream.Current.PayloadCase == ClientToLoginMessage.PayloadOneofCase.Reconnect)
+        {
+            await HandleReconnectAsync(requestStream.Current.Reconnect, responseStream, cancellationToken);
+            return;
+        }
+
         if (requestStream.Current.PayloadCase != ClientToLoginMessage.PayloadOneofCase.Credentials)
         {
-            _logger.LogWarning("첫 메시지가 Credentials가 아님: {Peer}", context.Peer);
+            _logger.LogWarning("첫 메시지가 Credentials/Reconnect가 아님: {Peer}", context.Peer);
             await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
             return;
         }
@@ -114,6 +123,11 @@ internal sealed class LoginConnectionHandler
             CurrentServer = _masterConnection.SelfAddress,
             CurrentToken = initialToken,
             TokenIssuedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            // Status와 다르게 이건 "지금 실제 소유자"를 나타내야 하므로 Login으로 채운다 -
+            // RemoteMailNotifier가 이 값을 보고 로그인 중인 세션한테는 의도적으로 메시지를
+            // 안 보내게 하는 근거가 됨(보안 - 로그인 서버는 아주 찰나만 권한을 점유하는
+            // 특수 상태).
+            OwnerServerType = GameServer.Common.ServerType.Login,
         };
 
         var claimResult = await _sessionRegistry.TryClaimOwnershipWithPreviousOwnerAsync(
@@ -144,6 +158,7 @@ internal sealed class LoginConnectionHandler
         newSession.CurrentServer = string.Empty;
         newSession.NextServer = lobby.Value.Address;
         newSession.OwnerServerId = lobby.Value.ServerId;
+        newSession.OwnerServerType = GameServer.Common.ServerType.Lobby;
         await _sessionRegistry.UpdateAsync(playerId, newSession);
 
         _logger.LogInformation("로그인 성공, 로비로 이관: {PlayerId} → {Address}", playerId, lobby.Value.Address);
@@ -156,10 +171,92 @@ internal sealed class LoginConnectionHandler
                 PlayerId = playerId,
                 Token = initialToken,
                 ChatAddress = _masterConnection.ChatServerAddress,
+                DestinationServerType = GameServer.Common.ServerType.Lobby,
             },
         }, cancellationToken);
 
         // 7. 스트림 종료 - 클라는 이 로그인 서버로 다시 안 온다.
+    }
+
+    /// <summary>
+    /// 갈 곳을 잃은 클라의 재진입 처리 - "안정적 단일 조회 창구" 역할(KNOWN_ISSUES.md 참고).
+    /// 세션이 살아있는 소유자를 갖고 있을 때만 그 소유자 주소로 안내하고, 소유권 자체는
+    /// 안 건드린다(로그인 서버가 다시 클레임할 필요가 없음 - 그냥 "가라"고 알려주기만
+    /// 함). 세션이 없거나 소유 서버가 죽어있으면 자격증명으로 처음부터 다시 로그인하라고
+    /// 거부한다 - 대조할 세션이 없는 상태에서 토큰 문자열만으로 신원을 인정하면 검증
+    /// 불가능한 사칭 구멍이 생기기 때문(설계 논의 중 확인됨).
+    /// </summary>
+    private async Task HandleReconnectAsync(
+        ReconnectRequest request,
+        IServerStreamWriter<LoginToClientMessage> responseStream,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(request.PlayerId) || string.IsNullOrEmpty(request.Token))
+        {
+            await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+            return;
+        }
+
+        OwnerInfo? owner;
+        try
+        {
+            owner = await _sessionRegistry.GetOwnerAsync(request.PlayerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "재진입 처리 중 세션 레지스트리 조회 실패: {PlayerId}", request.PlayerId);
+            await TrySendRejectedAsync(responseStream, "INTERNAL_ERROR", cancellationToken);
+            return;
+        }
+
+        if (owner == null || !owner.IsAlive || string.IsNullOrEmpty(owner.Address))
+        {
+            // 세션 자체가 없거나, 있어도 소유 서버의 하트비트가 이미 만료됨 - 대조할
+            // 대상이 없으므로 재진입 자체를 거부. 처음부터 다시 로그인해야 함.
+            _logger.LogInformation("재진입 실패 - 살아있는 소유자 없음: {PlayerId}", request.PlayerId);
+            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            return;
+        }
+
+        var session = await _sessionRegistry.GetAsync(request.PlayerId);
+        if (session == null || !TokenVerification.IsValid(session, request.Token))
+        {
+            _logger.LogInformation("재진입 실패 - 토큰 불일치: {PlayerId}", request.PlayerId);
+            await TrySendRejectedAsync(responseStream, "INVALID_TOKEN", cancellationToken);
+            return;
+        }
+
+        var destinationServerType = owner.ServerType switch
+        {
+            GameServer.Common.ServerType.Lobby => GameServer.Common.ServerType.Lobby,
+            GameServer.Common.ServerType.Ingame => GameServer.Common.ServerType.Ingame,
+            _ => (GameServer.Common.ServerType?)null,
+        };
+
+        if (destinationServerType == null)
+        {
+            // Login 소유(로그인 중인 다른 세션과 경합) 등 재진입 안내 대상이 아닌 타입 -
+            // 이 경우도 처음부터 다시 로그인하게 한다.
+            _logger.LogInformation("재진입 실패 - 안내 불가능한 소유 서버 타입: {PlayerId} Type={Type}",
+                request.PlayerId, owner.ServerType);
+            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            return;
+        }
+
+        _logger.LogInformation("재진입 성공 - 안내: {PlayerId} → {Address} ({Type})",
+            request.PlayerId, owner.Address, destinationServerType);
+
+        await TrySendAsync(responseStream, new LoginToClientMessage
+        {
+            Redirect = new LoginRedirect
+            {
+                LobbyAddress = owner.Address,
+                PlayerId = request.PlayerId,
+                Token = session.CurrentToken,
+                ChatAddress = _masterConnection.ChatServerAddress,
+                DestinationServerType = destinationServerType.Value,
+            },
+        }, cancellationToken);
     }
 
     /// <summary>
@@ -189,22 +286,10 @@ internal sealed class LoginConnectionHandler
     /// <summary>계정 서버에 검증을 요청하고, 없으면 같은 정보로 생성까지 시도해서 playerId를 얻는다.</summary>
     private async Task<string?> ResolvePlayerIdAsync(Credentials credentials, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(_masterConnection.AccountServerAddress))
-        {
-            _logger.LogError("계정 서버 주소 없음 - 로그인 처리 불가");
-            return null;
-        }
-
         try
         {
-            using var channel = CreateChannel(_masterConnection.AccountServerAddress);
-            var client = new AccountControl.AccountControlClient(channel);
-
-            var verifyResponse = await client.VerifyAccountAsync(new VerifyAccountRequest
-            {
-                AccountId = credentials.AccountId,
-                Password = credentials.Password,
-            }, cancellationToken: cancellationToken);
+            var verifyResponse = await _accountServer.VerifyAccountAsync(
+                credentials.AccountId, credentials.Password, cancellationToken);
 
             if (verifyResponse.Found)
             {
@@ -213,11 +298,8 @@ internal sealed class LoginConnectionHandler
 
             // 계정이 없으면 같은 정보로 새로 만든다 (별도 "계정 생성 확인" 단계 없이 -
             // 지금은 임시로 간단하게 처리).
-            var createResponse = await client.CreateAccountAsync(new CreateAccountRequest
-            {
-                AccountId = credentials.AccountId,
-                Password = credentials.Password,
-            }, cancellationToken: cancellationToken);
+            var createResponse = await _accountServer.CreateAccountAsync(
+                credentials.AccountId, credentials.Password, cancellationToken);
 
             if (createResponse.Success)
             {

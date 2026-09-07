@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "common.proto";
+
 option csharp_namespace = "LoginServer";
 
 // 클라이언트 최초 접속 전용 서버. 로그인 성공 후 손을 떼면 클라는 다시 이 서버로
@@ -19,12 +21,25 @@ service LoginControl {
 message ClientToLoginMessage {
   oneof payload {
     Credentials credentials = 1;
+    ReconnectRequest reconnect = 2;
   }
 }
 
 message Credentials {
   string account_id = 1;
   string password = 2;
+}
+
+// 갈 곳을 잃은 클라가 자격증명 재입력 없이 재진입을 시도할 때 쓴다(KNOWN_ISSUES.md
+// 참고 - 로그인 서버가 "안정적 단일 조회 창구" 역할을 겸함). player_id는 토큰
+// 문자열에서 뽑아내는 게 아니라 클라가 별도로 캐시해둔 값을 그대로 보낸다 - 세션이
+// 살아있을 때만 이 값과 토큰을 세션의 실제 기록과 대조하므로, 세션이 없으면(=
+// 대조할 대상 자체가 없으면) 이 요청은 무조건 거부되고 자격증명으로 처음부터
+// 다시 로그인해야 한다(토큰 문자열만으로 신원을 주장하게 허용하면 검증 불가능한
+// 사칭 구멍이 생기므로 - 세션 없이는 절대 통과시키지 않음).
+message ReconnectRequest {
+  string player_id = 1;
+  string token = 2;
 }
 
 message LoginToClientMessage {
@@ -35,6 +50,9 @@ message LoginToClientMessage {
 }
 
 message LoginRedirect {
+  // 최초 로그인 시엔 항상 로비 주소. 재진입(ReconnectRequest) 응답일 땐 destination_type에
+  // 따라 로비 또는 인게임 서버 주소일 수 있음(이미 있던 필드를 재사용 - 이름은
+  // 그대로 두되 의미가 확장됨).
   string lobby_address = 1;
   string player_id = 2;  // 클라가 이후 로비 요청 시 필요 (playerId 자체를 알아야 하는
                           // 화면/로직이 있을 수 있음)
@@ -45,12 +63,20 @@ message LoginRedirect {
                              // 다른 서버 주소들과 일관되게 여기서 동적으로 내려준다 - 배포
                              // 유연성(채팅 서버 주소가 바뀌어도 클라 재배포 불필요) +
                              // 로그인 전엔 이 주소 자체를 몰라도 되는 부가적 이점.
+
+  // 재진입 응답에서만 의미 있음(최초 로그인 응답은 항상 Lobby) - lobby_address가
+  // 실제로 로비인지 인게임 서버인지 클라가 구분해서 그에 맞는 접속 절차(EnterLobby
+  // vs NGO ConnectionApproval)를 밟을 수 있게 함. 별도 enum 대신 common.proto의
+  // ServerType을 그대로 재사용 - 의미가 완전히 같은 걸 새로 안 만듦.
+  ServerType destination_server_type = 5;
 }
 
 // reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치, 생성도 실패),
 // "SESSION_CONFLICT"(이미 다른 서버가 이 플레이어를 살아서 소유 중),
 // "NO_LOBBY_AVAILABLE"(매칭 서버가 갈 수 있는 로비를 못 찾음 - "서버가 가득 찼습니다"),
-// "TIMEOUT"(제한 시간 안에 계정 정보 미제출), "INTERNAL_ERROR"(그 외 내부 오류)
+// "TIMEOUT"(제한 시간 안에 계정 정보 미제출), "INTERNAL_ERROR"(그 외 내부 오류),
+// "NO_ACTIVE_SESSION"(ReconnectRequest인데 살아있는 소유 세션이 없음 - 자격증명으로
+// 처음부터 다시 로그인해야 함), "INVALID_TOKEN"(ReconnectRequest인데 토큰이 세션과 불일치)
 message LoginRejected {
   string reason = 1;
 }

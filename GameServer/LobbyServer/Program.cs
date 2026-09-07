@@ -27,6 +27,12 @@ builder.Services.AddMainServerMessaging(builder.Configuration);
 // 매칭 서버 접속 - 로비는 즉시 접속을 시도한다(MatchServerConnection이 자체적으로 준비된 것으로 봄).
 // 매칭 서버가 push하는 매칭 확정/취소 알림은 MatchNotificationDispatcher가 받아서 처리한다.
 builder.Services.AddSingleton<MatchNotificationDispatcher>();
+
+// 우편함 - 연결 레지스트리 + AccountServerIntermediary 서브클래스 + 직접 대상 전달 클래스.
+builder.Services.AddSingleton<LobbyConnectionRegistry>();
+builder.Services.AddSingleton<LobbyAccountServerIntermediary>();
+builder.Services.AddSingleton<LobbyMailDeliverer>();
+builder.Services.AddSingleton<LobbyMainServerIntermediary>();
 builder.Services.AddSingleton<IMatchNotificationHandler>(sp => sp.GetRequiredService<MatchNotificationDispatcher>());
 builder.Services.AddSingleton<MatchServerConnection>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchServerConnection>());

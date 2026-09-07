@@ -1,827 +1,229 @@
 # TODO
 
-미완성 작업, 논의 중인 사항, 추후 구현할 것들을 모아둔다.
-구현 완료 시 항목을 삭제하지 말고 [완료] 표시와 함께 남겨둔다.
-
----
-
-## 논의 중
-
-### 재접속 정책
-
-**결정된 것**
-- 재접속 허용 여부는 방 단위로 결정한다.
-- 싱글플레이는 방 1개당 유저 1명이라 사실상 플레이어 단위와 동일하다.
-- 방이 타임아웃을 감지한 후에 세션 레지스트리를 수정한다.
-- **세션 레지스트리는 "관리 권한 기록부"로만 쓴다. 방 상태는 Redis에 안 둔다.**
-  - `room:{roomId}:info`, `room:{roomId}:players` 안 만들기로 결정.
-  - 방은 그 방을 열고 있는 인게임 서버와 운명을 같이 한다 - 그 서버가 죽으면 방도 같이 사라지고,
-    다른 서버가 이어받는 시나리오 자체가 없다. 그러니 방 상태를 외부(Redis)에 복제해봤자
-    "죽은 서버 대신 이어받기"에 못 쓴다 - 애초에 목적이 성립하지 않는다.
-  - 유저가 어느 방 소속인지 같은, 그 서버가 스스로 알고 있어야 할 업무 데이터는 각 서버
-    내부 메모리에 둔다 (매칭 서버는 `_playerToMatch`로 이미 구현됨. 인게임 서버는 아래
-    "방 소속 자료구조" 참고).
-- **[완료] 로그인/재접속 흐름은 하나로 통일된다 - "로그인 방식이 2개"로 보지 않는다.**
-  JWT를 한 번 발급받으면 클라가 로컬에 캐시해뒀다가 만료 전까지 재사용하는 게 표준이므로:
-  - 최초 로그인(또는 토큰 만료) → `Login(id, pw)`로 새 JWT 발급 → `EnterLobby()`
-  - 재접속(토큰 아직 유효) → `Login` 생략, 캐시된 JWT로 바로 `EnterLobby()`
-  - 서버 입장에서는 `EnterLobby`가 그 JWT가 방금 발급된 건지 캐시에서 꺼낸 건지 몰라도 된다 -
-    `AuthInterceptor`가 검증한 playerId만 보고 소유권 클레임을 시도할 뿐이라, "Moving 상태
-    로그인 처리"라는 별도 분기가 필요 없어졌다. `TryClaimOwnershipWithPreviousOwnerAsync`가
-    생사 여부와 무관하게 이미 일관되게 처리한다(살아있으면 거부+리다이렉트, 죽어있으면 승인).
-- 재접속 시 흐름: 클라가 로그인 후 `EnterLobby` RPC를 호출하면, 로비가 세션 레지스트리에
-  자신으로 소유권 이전을 시도한다. 기존 소유자(주로 인게임 서버)가 아직 살아있으면 거부되고,
-  그 서버 주소가 같이 반환된다 - 로비는 이걸로 "진행 중인 게임이 있습니다" 안내를 클라에게 띄울 수 있다.
-  (기존 소유자가 죽어있으면 정상적으로 로비가 소유권을 가져오고 EnterLobby는 성공한다.)
-- 서버 생존 TTL과 객체 권한 관리를 Redis(Session Registry)가 담당한다.
-  - 서버 하트비트 간격: 5초 / 서버 TTL: 10초
-  - 서버 등록과 하트비트를 분리했다. 기동 시 `RegisterServerAsync(id, address)`로
-    ID+주소를 한 번 등록하고, 이후 하트비트는 `RefreshServerHeartbeatAsync`가 TTL만 갱신한다
-    (값 재전송 없음 - 하트비트에 불필요한 부하를 주지 않기 위함).
-  - 권한 이전 판단은 Lua 스크립트로 원자적 처리 (`TryClaimOwnershipAsync` /
-    `TryClaimOwnershipWithPreviousOwnerAsync` - 후자는 거부 시 기존 소유자 정보까지 반환).
-  - `GetOwnerAsync`(순수 조회), `GetServerAddressAsync` 추가.
-  - 클라가 새 서버에 접속 시 TryClaimOwnership으로 권한 이전 요청
-- **[완료] MatchToken 제거**: `PlayerSession.MatchToken`, `ingame.proto`의 `ApprovalRequest.match_token`
-  모두 제거 (서버/Unity 양쪽 다). 매칭 서버가 게임 에이전트에 플레이어 명단을 전달하므로 불필요.
-  ConnectionApproval은 OwnerServerId 검증으로 대체.
-
-**`GameType` 도입 - [완료]**
-`allow_reconnect` 필드 하나만 넘기는 대신, 방의 게임 모드 자체(`GameType`)를 파이프라인
-전체(로비→매칭→게임에이전트→인게임 서버)에 관통시키기로 결정 변경. 재접속뿐 아니라
-게임 룰 전반(랭크/일반/이벤트 모드 등)이 결국 게임 타입에 따라 갈릴 거라, 그 상위 개념
-하나로 통일하는 게 확장성이 낫다고 판단.
-- `common.proto`에 `GameType` 열거형 신설: `GAME_TYPE_UNSPECIFIED`(필드 안 채움, 구버전
-  호환) / `NONE`(의도적으로 모드 없음) / `NORMAL` / `DELETED`(폐지된 모드). `NONE`/`DELETED`를
-  미리 넣어둔 이유: 서버들이 전부 롤링 재시작을 마치지 못한 채 배포가 섞이는 경우를 대비 -
-  인게임 서버가 모르는 값을 만나면 `GameErrorCode.UnsupportedGameType`으로 명시적 거부하고
-  크래시하지 않게 하기 위함.
-- `MatchRequest`(클라→로비), `JoinMatchRequest`(로비→매칭), `PrepareMatchRequest`(매칭→
-  게임에이전트), `OpenRoom`(게임에이전트→인게임 서버) 전부에 `game_type` 필드 추가, 끝까지
-  배선 완료.
-- 실제 매칭 시 같은 `game_type`끼리만 묶는 필터링 로직 자체는 아직 없음(매칭 알고리즘이
-  여전히 더미라서) - 나중에 실력 기반 매칭 알고리즘 만들 때 같이 구현.
-
-**`allow_reconnect` - [완료] `GameType`으로부터 각 서버가 자체 판단하는 방식으로 구현**
-
-*재접 불가능한 방(GetAllowReconnect(gameType) == false)*
-- 클라가 NGO에서 나가면(`OnClientDisconnected`) 게임 에이전트가 **즉시** 세션 레지스트리의
-  `OwnerServerId`를 비운다 (기존 동작 그대로).
-- 클라가 아무 로비에나 재접속하면 `EnterLobby`가 소유자 없음을 보고 그냥 승인.
-
-*재접 가능한 방(GetAllowReconnect(gameType) == true)*
-- `HandlePlayerLeftAsync`(게임 에이전트)가 소유권을 유지한 채로 유예 타이머(기본 30초,
-  `ReconnectGracePeriod` 상수)를 돌린다. 그 안에 같은 방으로 재접속하면(`HandlePlayerJoinedAsync`가
-  다시 불리면) 세션은 그대로 유지. 유예 시간 안에 재접속 못 하면 `ISessionRegistry.RemoveAsync`로
-  세션을 완전히 삭제한다.
-- `GetAllowReconnect(GameType)`는 게임 에이전트(.NET, 세션 관리용)와 `RoomManager`(Unity,
-  Room 파생 클래스 선택용) **양쪽에 각자 따로** 있다 - 같은 규칙을 중복 구현하는 게 아니라,
-  같은 GameType을 보고 "세션을 어떻게 다룰지"(게임 에이전트)와 "방 동작을 어떻게 할지"
-  (Unity)라는 서로 다른 결정을 각자 내리는 것이라 의도적으로 분리함.
-- 정책값(어느 GameType이 재접속을 허용하는지, 유예 시간 몇 초인지)은 지금 하드코딩 -
-  나중에 설정 파일/마스터에서 받아오는 방식으로 바꿀 수 있음(지금 단계엔 충분).
-
-**⚠ 구조적 한계 - 재접속 관련, 없앨 수 없고 완화만 가능**
-
-*재접 불가능 방에서 "나감 처리"와 "재접속 시도"의 경합*
-클라가 끊긴 순간부터 서버 정리(Unity→게임에이전트→Redis, 네트워크 몇 홉)가 끝날 때까지
-물리적으로 시간이 걸린다. 그 찰나에 클라가 로비에 `EnterLobby`를 부르면, 아직 소유권이
-안 풀려서 "기존(재접 불가능한) 인게임 서버로 가라"는 무의미한 안내를 받을 수 있다.
-- 이 경합 자체는 클라/서버 어느 쪽에서도 완전히 없앨 수 없다(비동기 이벤트 체인이라
-  "정리 완료 전엔 재접속 시도 금지"를 강제할 방법이 없음).
-- **클라 쪽에 대기 시간을 두는 건 방어로 쓸 수 없다** - 변조된 클라가 그 대기를 그냥
-  무시하고 계속 두드릴 수 있어서, 신뢰 기반 방어는 의미가 없다.
-- 근데 이게 보안 구멍은 아니다 - 어차피 재접 거부는 정확히 이뤄지고 있고(뚫리지 않음),
-  그냥 짧은 시간 동안 무의미한 왕복이 반복될 뿐이다(자원 낭비 + 어색한 UX 문제).
-- **[결정] 이 경합은 처리 불가로 확정 - 완화만 가능.** 세션 레지스트리 반영 전에 클라가
-  재접속을 시도하는 것 자체를 막을 방법은 없다(구조적 한계). 레이트 리밋도 이 경합을
-  "없애주는" 게 아니라는 걸 명확히 함 - 레이트 리밋은 순수 남용 방지용이고, 반영이
-  끝나기 전 재시도는 여전히 정상적으로 거부되며 그건 버그가 아니라 정확한 응답이다.
-- **[완료] `EnterLobby`에 서버 쪽 rate limit 도입** - `IRateLimiter`(`Shared.Common.Redis`)를
-  `SessionRegistryConnector`가 같은 지연 연결로 프록시. `SET NX PX 300ms`로 원자적 판단.
-  `EnterLobbyResponse.rate_limited` 필드 추가. (참고: 이 항목 바로 위에 남아있던 설계
-  논의 내용은 실제 구현에 그대로 반영됨.)
-
-**방 소속 자료구조 (인게임 서버 쪽) - [완료]**
-```csharp
-internal abstract class Room
-{
-    public string RoomId { get; }
-    public HashSet<string> ExpectedPlayerIds { get; }             // OpenRoom으로 받은 기대 명단
-    public Dictionary<string, ulong> ConnectedClients { get; } = new();  // playerId → clientId, 접속 완료된 것만
-    public bool AllowReconnect { get; protected set; }             // 파생 클래스 생성자에서 GameType에 따라 결정
-}
-
-internal sealed class NormalRoom : Room { /* AllowReconnect = true (예시 정책) */ }
-```
-- `RoomManager.OpenRoom(roomId, playerIds, gameType)`이 팩토리 역할 - `GameType`에 따라
-  알맞은 `Room` 파생 클래스를 만들고, 모르는/지원 안 하는 타입이면 `GameErrorCode.
-  UnsupportedGameType`으로 명시 거부.
-- `RoomManager`는 `playerId` 기준으로 관리, `clientId↔playerId` 매핑은 `IngameServerInstance`가
-  중개(지금 구조 유지). `IngameServerInstance.OnClientConnected`/`OnClientDisconnected`가
-  `RoomManager.RegisterConnectedClient`/`UnregisterConnectedClient`를 호출해서
-  `Room.ConnectedClients`를 실시간으로 갱신함.
-- 별도의 "아직 방에 배정 안 된 클라" 임시 풀은 안 만듦(그런 시점 자체가 없음).
-
-**[완료] 게임 에이전트의 자체 방-채움 타임아웃**
-
-방 열린 뒤 일정 시간 안에 `ExpectedPlayerIds` 전원이 `ConnectedClients`에 다 들어왔는지
-확인하는 타이머. 아래는 설계 논의 기록(전부 실제 구현에 반영됨):
-
-**⚠ 별개로 짚은 것 - "게임 시작" 트리거는 타이머랑 완전히 무관해야 함.**
-처음 설계엔 "다 찼을 때 뭘 하는지"가 빠져 있어서, 자칫 타이머의 자기 확인 로직에
-"다 찼으면 시작"까지 같이 넣기 쉬웠는데 - 그러면 진짜로 다 찼어도 타이머 만료 전까진
-게임이 안 시작하는 버그가 생긴다. **"다 찼다"는 마지막 플레이어가 접속하는 바로 그
-순간(`RoomManager.RegisterConnectedClient` 안)에 즉시 확인하고 즉시 트리거해야 하고,
-타이머는 오직 "그때까지도 안 찼는지"만 확인하는 별개의 진입점이어야 한다.** 타이머가
-만료됐는데 이미 다 찼으면(이미 시작 트리거가 먼저 돌았을 것) 조용히 아무것도 안 하고
-끝난다.
-
-```
-1. 타이머는 Unity Room에 둔다 (Task.Delay - Room이 MonoBehaviour는 아니지만, 메인
-   스레드에서 시작한 호출이면 Unity의 SynchronizationContext 덕분에 await 이후도
-   자동으로 메인 스레드로 돌아옴 - 코루틴/MonoBehaviour 불필요).
-2. 타이머 만료 시 Room이 자기 상태(ConnectedClients vs ExpectedPlayerIds)를 스스로
-   확인한다 - RoomManager한테 다시 물어봐도 어차피 Room.ConnectedClients를 그대로
-   보는 것이므로(RoomManager.RegisterConnectedClient가 이 Room 인스턴스의 필드를
-   직접 갱신함), 중간에 한 번 더 왕복할 이유가 없어서 자체 확인으로 단순화함.
-3. 아직도 결원이면 RoomManager한테 "이 방 PendingKill 등록해줘" 요청한다 (이 순간부터
-   그 방으로의 신규 접속은 거부 - 이미 처리 중이라고 보고 막음).
-4. RoomManager가 게임 에이전트한테 새 메시지로 보고: 인게임 서버 → 게임 에이전트
-   방향의 신규 메시지 필요 (`GameServerMessage`에 `RoomTimeout{room_id}` 케이스 추가).
-   지금까지 있던 CancelRoom 흐름은 전부 게임에이전트→인게임 한 방향뿐이었는데, 이건
-   반대 방향의 신규 배선.
-5. 게임 에이전트가 이 보고를 받으면 기존 `CancelRoomAsync`와 같은 처리(매칭 서버한테
-   로비 주소 조회 → 세션 이전 → `CloseRoom`으로 최종 정리 지시)를 그대로 재사용한다.
-```
-
-**⚠ 남는 경합 - 완전히 없앨 수 없음, `EnterLobby`와 같은 부류의 문제**
-"타이머 만료(판단 시점)"와 "실제 처리(실행 시점)" 사이에, 마지막 결원이 NGO 핸드셰이크는
-이미 성공했지만 `OnClientConnected` 콜백이 아직 안 불린 그 찰나에 걸리면, 방이 이미
-`PendingKill`로 넘어가서 방금 접속한 클라도 리다이렉트 대상으로 취급될 수 있다. 두
-이벤트(타이머 만료, NGO 콜백)가 서로 독립적으로 스케줄되는 한 이 창을 0으로 만들
-방법은 없다(수학적으로 불가능 - `EnterLobby` 경합과 동일한 성격). 다만 완전히 깨지는
-게 아니라 "아깝게 놓친 클라가 정상적으로 리다이렉트 안내를 받는" 정도로 우아하게
-처리되므로, 지금은 이 정도로 받아들이고 넘어가기로 함. (창을 더 좁히고 싶으면 나중에
-PendingKill 등록 전에 아주 짧은 유예를 한 번 더 두는 것도 검토 가능 - 그래도 0은 안 됨.)
-
-**타이밍 겹침 검토 - 안 겹침을 확인함.** 게임 에이전트가 이미 하는 `CancelRoom` 처리
-(매칭 서버가 로비/클라 사정으로 취소를 지시하는 경우)는 **매칭 서버가 아직 가상의 방을
-갖고 있는 시점**(6~7번 구간)에만 일어난다. 반면 이번에 새로 만드는 "자체 방-채움
-타임아웃"은 **이미 로비가 클라한테 인게임 서버로 가라고 지시한 이후, 매칭 서버가
-가상의 방을 지우고 손을 뗀 뒤**에만 일어날 수 있는 시나리오다. 두 경로가 동시에
-발생할 수 있는 타이밍 자체가 없어서(매칭 서버가 가상의 방을 아직 안 지웠는데 게임
-에이전트가 로비 주소를 요청하는 경우는 순서상 성립 불가), 별도의 경합 방지 로직 없이
-`RequestLobbyAddress` 등 기존 배관을 그대로 공유해도 안전함.
-
-### 매칭 흐름 설계 (정상 흐름 + 장애 처리)
-
-**정상 흐름 (최종)**
-1. 로비 서버가 매칭 원하는 클라를 매칭 서버에 등록 (`JoinMatch`)
-2. 매칭 서버가 클라들을 선별해 가상의 방(matchId) 생성, 선별된 클라 투입
-3. 매칭 서버가 적절한 게임 에이전트에게 클라 목록 + 방 ID 제공, 방 생성 요청 (`PrepareMatch`)
-4. 게임 에이전트가 요청을 받아 인게임 서버에 전달 (`OpenRoom`)
-5. 인게임 서버가 방을 열고 게임 에이전트에 알림 (`RoomOpened`)
-6. 게임 에이전트가 매칭 서버에 알림 (`PrepareMatchResult`)
-7. 매칭 서버가 방 안 클라들이 속한 로비 서버에게 인게임 서버 주소 전달 (`NotifyMatch`)
-8. 로비 서버가 세션 레지스트리에 클라 관리 권한을 해당 인게임 서버로 변경
-
-**[전부 완료] 정상 흐름 1~8번 전부 구현됨.**
-
-**핵심 설계 결정 — 매칭 서버는 8번(권한 이전) 이후 완전히 손을 뗀다.**
-초기에는 "게임 에이전트가 플레이어 접속 완료를 매칭 서버에 보고하는 Crossing 단계"를
-만들려고 했으나, 여러 차례 논의 끝에 폐기했다. 최종 결론:
-- **매칭 서버 책임 범위는 1~7번(로비에 알림을 보내기 전/보내는 시점)까지다.** 알림을 보낸
-  뒤에는 손을 뗀다 - 로비도 이 시점부턴 "자기 손을 떠났다"고 보고 아무것도 안 한다
-  (로비 관점 표에서 "1~8번: 클라가 넘어간 경우 → 손댈 수 없음"으로 명시).
-- **"방 열었는데 아무도(또는 일부만) 안 온다"는 것은 게임 에이전트/인게임 서버가 자체
-  타임아웃으로 감지하고 처리한다.** 매칭 서버에 보고할 필요가 없다 - 그래서 "게임
-  에이전트 → 매칭 서버 접속 완료 보고" RPC 자체가 불필요해졌다.
-- 이 결정 덕분에 `MatchPhase.Crossing`이라는 상태 자체가 필요 없어졌다 (열거형에는
-  남아있지만 실제로 쓰이지 않음 - 코드 정리 시 제거 후보).
-
-**매칭 서버 관점 - 각 단계 중단 처리 (전부 구현 완료)**
-```
-1번(등록만 됨) - 로비 끊김
-  → 그 로비가 요청한 매칭 전부 취소 (알림 없음 - 아직 아무것도 알려준 적 없음)
-
-2번(가상 방 생성됨, PrepareMatch 전) - 클라/로비 끊김
-  → 방 제거, 생존자 대기열 복귀 (알림 없음)
-
-3번(PrepareMatch 요청~거절 포함) - 클라/로비 끊김 또는 게임 에이전트가 거절
-  → (필요시) 게임 에이전트에 방 취소 요청 + 방 제거 + 생존자 복귀 (알림 없음 -
-    아직 "잡혔다"고 알린 적 없으므로 조용히 재시도)
-
-6~7번(방 열림 ~ 로비 통보) - 클라/로비/게임에이전트 끊김
-  → 게임 에이전트에 방 취소 요청(살아있으면) + 방 제거 + 생존자 복귀 +
-    "매칭 취소" 알림 (여기서부터는 이미 로비에 "잡혔다"고 알렸을 수 있으므로 알림 필요)
-
-8번 이후 - 매칭 서버 관할 아님 (게임 에이전트가 직접 처리, 아래 참고)
-```
-`매치 확정(HandlePrepareMatchResultAsync)`과 `끊김 처리(LeaveMatch/HandleServerDisconnected)`가
-같은 matchId를 두고 동시에 경합할 수 있어서(예: 확정되려는 순간 클라가 끊김), 매치의
-생성/선점(=제거)을 **`_matchLock` + `TryClaimMatch`로 원자화**했다 - 두 경로 다 이걸
-거치므로 먼저 온 쪽만 결과를 결정하고 나머지는 조용히 물러난다("클라 끊김과 같은
-의미로 간주"하기로 결정). `_matchesByLobby`(로비ID→matchId 역인덱스)도 같은 락으로
-보호해서, 로비 여러 개가 동시에 죽어도 순서대로 직렬화된다.
-`PendingMatch.Players`(`MatchPlayer` 리스트)가 생성 시점에 로비 정보를 스냅샷으로
-들고 있어서, 매치 관련 처리 중에 `_playerPool`을 다시 조회할 필요가 없다 - 이 덕분에
-매치로 넘어간 플레이어는 곧바로 `_playerPool`에서 빠지고, 중단되면 `DisruptMatch`가
-명시적으로 "복귀"시킨다.
-
-**로비 서버 관점 (구현 완료)**
-```
-클라 접속 시
-  세션 레지스트리에 권한 확인
-    등록된 클라, 권한 아님 → 권한 보유 서버로 이동 요청 (EnterLobby가 처리)
-    미등록 클라 → 권한 취득 시도, 실패 시 접속 끊음
-1~8번
-  클라가 남은 경우 → 대응 불필요
-  클라가 넘어간 경우 → 손을 뗌
-  클라가 끊긴 경우 → 매칭 서버한테 LeaveMatch 요청 (구현 완료 - CancellationToken 출처로
-    "정상 종료 vs 연결 끊김"을 구분해서 후자일 때만 호출)
-```
-
-**게임 에이전트 관점**
-```
-방 생성 요청이 온 경우 → 방 생성 [완료]
-방 취소 요청이 온 경우(CancelRoom) [완료]
-  접속한 클라가 존재
-    매칭 서버한테 로비 주소 요청(RequestLobbyAddress)
-      존재 → 세션 권한 이전 + CloseRoom(리다이렉트 정보 포함)으로 게임 서버에 전달
-      부재 → CloseRoom(리다이렉트 없음)
-  방 제거
-요청에 없는 클라가 접속한 경우 → 접속 끊음
-  (OwnerServerId 기반 ConnectionApproval이 이미 처리 - 별도 구현 불필요)
-
-[완료] 8번: 방 열린 뒤 일정 시간 대기 → 전원 접속했는지 자체 확인
-  클라가 방에 모두 접속 → 게임 시작
-  방에 결원 존재 → 매칭 서버한테 로비 주소 요청 → (위 CancelRoom과 같은 처리)
-  → `RoomTimeout`(인게임→게임에이전트 신규 메시지)/`PendingKill`로 구현 완료,
-    실제 엔드투엔드 테스트로 검증됨.
-```
-
-**"일부만 접속 실패 시 방 전체 취소" 정책 - 의도적 결정**
-리그 오브 레전드처럼 결원 있는 채로 시작하는 방식도 있지만, 여기서는 공정성을 우선해서
-전원 취소로 결정. "로비가 죽어서 이동 지시를 못 받은 것"도 결과적으로 "결원 발생"이므로
-같은 정책(전체 취소)을 적용한다.
-
-**클라 → 새 로비 리다이렉트 [구현 완료]**
-클라가 매치 확정 시(`MatchFound`) 원래 로비 스트림을 이미 닫아버리므로(NGO 접속 직전),
-방 취소 시점엔 로비를 통해 직접 push할 채널이 없다.
-- **이미 NGO로 접속한 클라**: `ingame.proto`의 `CloseRoom`/`PlayerRedirect` 메시지로
-  게임 에이전트 → 인게임 서버 → (`NetworkManager.DisconnectClient(clientId, lobbyAddress)`)
-  순으로 리다이렉트 주소를 실어서 끊는다.
-- **접속 시도 중인 클라**: `ConnectionApprovalCallback` 시점에 방이 이미 없으면 그 자체가
-  거부 사유가 된다 (별도 로직 불필요).
-- 리다이렉트 주소를 못 찾은 클라는 그냥 끊고, 클라가 스스로 로비 재접속(`EnterLobby`)을
-  타면 소유권 충돌 검사가 알아서 올바른 곳으로 안내한다 (매칭 서버가 특정 로비를
-  지정 배정/재시도하는 로직 불필요).
-
-**신규 RPC/메시지 [구현 완료]**
-- `matching.proto`: `CancelRoom`(매칭→게임에이전트), `RequestLobbyAddress`(게임에이전트→매칭)
-- `ingame.proto`: `CloseRoom`/`PlayerRedirect`(게임에이전트→인게임 서버)
-- `MatchingServer/Services/IngameMatchService.cs` → `InGameRelayService.cs`로 개명
-  (게임 에이전트가 매칭 서버에 거는 요청을 받는 쪽이라는 의미를 이름에 반영.
-  `MatchCallbackClient`(매칭이 게임 에이전트한테 거는 쪽)와 대칭됨)
-
-**인게임 서버가 터진 경우**
-```
-매칭 중 (PreparingRoom)
-  [완료] RPC 스트림이 끊겼을 때 서버 목록에서 원자적으로 제거 + MatchEngine.HandleServerDisconnected로
-  관련 매치까지 정리(Rollback + 대기열 복귀)
-
-매칭 완료 / 게임 중 (동일)
-  세션 레지스트리 서버 권한 TTL 만료 안 됨 → 클라 입장에서는 재접 시도 → 접속 불가 (그 이상 불가능)
-  세션 레지스트리 서버 권한 TTL 만료 → 클라가 접속한 로비가 권한 인계
-    (이미 구현됨 - EnterLobby의 TryClaimOwnershipWithPreviousOwnerAsync가 정확히 이 역할)
-```
-
-**로비 서버가 터진 경우**
-```
-매칭 중 (Queued/PreparingRoom)
-  [완료] RPC 스트림이 끊겼을 때 서버 목록에서 원자적으로 제거
-  [완료] 해당 로비 소속 클라 전부 방/클라 리스트에서 제거 (MatchEngine.HandleServerDisconnected,
-    _matchesByLobby 인덱스로 O(1)에 가깝게 조회)
-
-매칭 완료 이후 - 매칭 서버 관할 아님 (게임 에이전트가 직접 처리)
-
-게임 중
-  영향 없음 (이 시점엔 세션 권한이 이미 인게임 서버로 넘어가 있어서 로비가 죽어도 무관)
-```
-
-**결정된 것**
-- Redis Sentinel 또는 Cluster로 고가용성 확보 (운영 환경)
-- 서킷 브레이커 패턴으로 Redis 장애 시 제한적 동작 모드 전환
-- 운영 환경에서 Redis RDB + AOF 하이브리드 영속성 활성화
-
-**미결 사항**
-- 서킷 브레이커 구현 방식 및 각 서버별 폴백 동작 확정
-- 개발 환경에서는 단일 Redis로 유지, 운영 환경 전환 시 Sentinel/Cluster 적용
-
-### RegistryCleanupServer 폐기 이유
-
-초기에는 서버가 죽었을 때 플레이어 세션을 정리하는 전담 서버로 설계했다.
-명부(`Dictionary<serverId, HashSet<objectId>>`), GraveList(`HashSet<string>`) 등을
-메모리에 유지하는 구조였는데 다음 문제들이 있었다.
-
-- RegistryCleanupServer 자체가 죽으면 명부가 소멸
-- 명부 영속화를 위해 Redis를 쓰면 결국 Redis가 모든 정보를 들고 있게 됨
-- Redis가 서버 생존 TTL과 객체 권한 보유자를 직접 관리할 수 있음
-- 권한 이전 로직을 Lua 스크립트로 원자적 처리 가능
-- 클라 재접속 시 TryClaimOwnership으로 그 시점에 처리하면 별도 잔업 처리 불필요
-- 결론: RegistryCleanupServer 없이 Redis + 메인 서버로 처리 가능
-
-### 마스터 서버 역할 재정립 후 정리 필요
-
-매칭 서버 설계 완료 후 아래 항목들을 정리해야 한다.
-
-**마스터 서버 역할 (재정립)**
-- [완료] 접속한 서버 인증 (우리 서버인지 검증)
-  - `IServerAuthenticator` 퍼사드 인터페이스 도입. 지금은 `DummyServerAuthenticator`(항상 통과).
-    나중에 mTLS 도입 시 `CompositeServerAuthenticator`(여러 검증기 조합)로 교체 예정.
-    위치: `MasterServer/Security/`
-- [완료] 메인 서버들에 매칭 서버 주소 전달
-  - `ConnectionHandler`가 메인 서버 최초 접속 시 이미 등록된 매칭 서버 주소를 즉시 전달.
-    매칭 서버가 재등록될 때(재시작 등)는 접속 중인 메인 서버 전체에 브로드캐스트.
-- [완료] 메인 서버들에 세션 레지스트리(Redis) 주소 전달
-  - `master.proto`에 `SessionRegistryInfo` 추가. 마스터는 `shared.appsettings.json`의
-    `Redis:ConnectionString`을 자체적으로 읽어서(신규: `Program.cs`에서 로드), 접속하는
-    모든 서버 타입(매칭 서버 포함)에 최초 등록 시 바로 전달한다.
-  - 로비/게임 에이전트/채팅/매칭 서버는 더 이상 Redis 주소를 로컬 설정에서 읽지 않는다.
-  - `SessionRegistryConnector`(`Shared.Common/Redis/`)가 `ISessionRegistry`와
-    `ISessionRegistryConnector`를 동시에 구현하는 프록시로 동작한다. 연결 전에 호출되면
-    첫 연결까지 대기했다가 위임한다 - 순서 문제 없이 기존 코드(`LobbyControlService`,
-    `MatchEngine`, `GameServerHandler`, `ChatChannelManager`)는 그대로 둘 수 있었다.
-  - `MasterConnectionService`가 하트비트 루프 안에서 직접 `RefreshServerHeartbeatAsync`를
-    부르던 걸 제거하고, 별도 `ServerHeartbeatService`(`MainServer.Common/Heartbeat/`)로 분리.
-    이유: `MasterConnectionService`가 `ISessionRegistry`(→ 마스터 접속 후에야 연결됨)에
-    직접 의존하면 순환이 생기기 때문. `ServerHeartbeatService`는 프록시가 대기를
-    흡수해주므로 시작 순서를 신경 안 써도 된다.
-
-**제거 완료**
-- [완료] `MasterServer/Services/CleanupServerConnection.cs` 제거
-- [완료] `RegistryCleanupServer` 프로젝트, `Shared/RegistryCleanupServer.Contracts` 프로젝트 전체 삭제 (슬루션에서도 제거)
-- [완료] `ConnectionHandler.cs`에서 RegistryCleanupServer 통보 코드 제거
-  - 단, `ShutdownFlag`(정상/비정상 종료 구분)는 로그용으로 남겨둠. `master.proto`의
-    `ShutdownNotice` 자체를 없앨지는 아직 미정 (아래 항목 참고).
-- [완료] `MasterServer.csproj`에서 `RegistryCleanupServer.Contracts` 참조 제거
-
-**미결 사항**
-- `master.proto`의 `ShutdownNotice` 제거 여부 - 마스터가 잔업 처리를 안 하므로 불필요해질 수 있으나,
-  로그상 정상/비정상 종료 구분용으로는 남겨둘지 판단 필요.
-- **`MasterConnectionService`가 `ShutdownNotice`를 실제로 보내는 코드가 없음** - `ConnectionHandler`는
-  수신 시 정상 종료로 처리하는 로직이 있지만, `MasterConnectionService`엔 `StopAsync` 오버라이드가
-  없어서 이 메시지가 한 번도 발신되지 않는다. 즉 지금은 항상 "비정상 종료"로만 로그가 남는다.
-  - graceful shutdown을 구현하려면: (1) `MasterConnectionService.StopAsync`에서 `Shutdown` 메시지
-    전송, (2) `stop-servers.ps1`이 `taskkill /F` 대신 각 프로세스에 정상 종료 신호를 보내도록 수정
-    (새 콘솔 창으로 띄운 프로세스라 Ctrl+C 전달이 간단치 않음 - 방법 검토 필요) 이 둘 다 필요함.
-  - 지금까지 테스트는 계속 `start/stop-servers.ps1`로 해왔으므로 당장 급한 건 아님. 나중에 처리.
+미완성 작업과 알려진 구조적 한계를 모아둔다. 완료된 것들의 상세한 발견-원인-해결 경위는
+`KNOWN_ISSUES.md`에, 지금 구조가 왜 이렇게 됐는지는 `ARCHITECTURE.md`에 있다 - 여기는
+"뭐가 남았는지"만 빠르게 훑는 용도로 간결하게 유지한다.
 
 ---
 
 ## 구현 필요
 
-- [완료] 퇴장 후 로비 복귀 검증 테스트 - 오늘 클라 접속→매치→인게임 이동→게임 종료→
-  로비 복귀(리다이렉트+재접속)까지 실제 로그로 전부 확인함.
-
-- **토큰 2슬롯 대조 검증 - [완료] 로비/인게임 양쪽 다**
-  - [완료] 인게임→로비(`EnterLobby`) - 이전 라운드에서 완료.
-  - [완료] 로비→인게임(`ConnectionApproval`) - `ingame.proto`의 `ApprovalRequest`/
-    `ApprovalResponse`에 각각 `token`/`new_token` 필드 추가. NGO 접속 payload를
-    `"{playerId}|{token}"` 형식으로 변경. 게임 에이전트가 `TokenVerification.IsValid`로
-    검증 후, 승인 시 `PreviousToken`/`CurrentToken` 회전까지 수행("갱신 권한은
-    `OwnerServerId`를 가진 서버만" 원칙 유지). 새 토큰은 `ApprovalResponse`(게임 서버↔게임
-    에이전트 간 통신이라 클라가 직접 못 받음) 대신, 이미 만든 `CustomMessagingManager`
-    패턴(`RoomClosed`와 동일)으로 `"TokenUpdate"` 메시지를 신설해서 클라에 별도 전달함.
-  - **[검토 완료, 문제없음으로 결론]** "인게임 서버가 토큰 회전 직후, 결과를 클라에
-    전달하기 전에 죽는" 경합을 검토함 - 회전은 게임 에이전트가 Redis에 이미 원자적으로
-    기록해둔 뒤라, 클라가 그 사실을 몰라도 클라가 들고 있는 값이 정확히 `PreviousToken`
-    자리에 있게 되므로 2슬롯이 그대로 흡수함. 실제 문제는 없었음.
-  - **[미구현, 별도 항목으로 분리] 인게임 서버 비정상 종료 시 클라 자동 로비 복귀** -
-    위 경합 조사 중 발견한 진짜 구멍. 지금 `ClientInstance.OnNgoClientDisconnected`는
-    로그만 남기고 아무것도 안 함 - `RoomClosed`(정상 종료 시의 명시적 지시)를 못 받는
-    비정상 종료(인게임 서버 크래시 등) 시 클라가 스스로 로비로 안 돌아감. 다만 의도적으로
-    **자동 복귀시키지 않기로 결정** - "일부 게임은 로그인 화면으로 보내지만, 갑자기
-    접속이 끊기면 그냥 튕기는 게 맞다"는 판단. 재접속은 클라가 스스로(수동으로) 다시
-    시작하는 걸로 정리 - "인게임 서버 다운" 시나리오(세션 레지스트리 TTL 만료 기반)와
-    겹치는 부분이라 그쪽 설계와 충돌 안 하게 조율 필요.
-  - **[결정 - 코드 변경 없음] 게임 에이전트-인게임 서버 하트비트 종료 비대칭은 의도적으로
-    유지** - 인게임 서버는 게임 에이전트 연결이 끊기면(하트비트 타임아웃 포함) 자기
-    프로세스를 종료하는데(`GameManager.Shutdown()` → `Application.Quit()`), 게임
-    에이전트는 인게임 서버 연결이 끊겨도 안 죽고 부하 0으로 계속 살아있음. 처음엔
-    비대칭이 문제로 보였으나, **나중에 게임 에이전트가 유니티 `.exe`를 직접 자식
-    프로세스로 실행/재시작하는 슈퍼바이저 역할을 겸하게 될 예정**이라 - 슈퍼바이저는
-    자식이 죽어도 안 죽어야 다시 띄울 수 있으므로, 지금 비대칭이 오히려 그 미래 구조의
-    전제 조건과 정확히 맞음. 지금은 게임 에이전트/인게임 서버가 테스트 환경상 완전히
-    독립적으로 뜨고 있어서 이 부모-자식 관계 자체가 아직 없음 - 나중에 프로세스 스폰 +
-    종료 감지 + 재시작 로직 구현 필요.
-
-- **채팅 서버 - [완료] 전면 재설계** (`IChatMessageStore` 공유 저장소 교체 포함)
-  - 예전 파일들(`ChatChannelManager`, 인메모리 `IChatMessageStore` 등)은 전부 구버전으로
-    간주하고 처음부터 재작성함.
-  - [완료] **영속 저장소** - `ChatRedisConnection`(세션 레지스트리와 완전히 별개인 채팅
-    서버 전용 Redis 연결/키스페이스 `chat:`) 기반으로 `IChatRoomStore`/`RedisChatRoomStore`
-    (1:1 방 멤버십)와 `IChatMessageStore`/`RedisChatMessageStore`(Sorted Set, 시간순
-    페이지네이션)를 새로 만듦 - 예전 "인스턴스 로컬이라 다른 인스턴스로 재접속하면 기록을
-    모름" 문제가 이걸로 자동 해결됨.
-  - [완료] **인증** - `WebSocketHandler` 핸드셰이크 시점에 playerId+token을 받아
-    `TokenVerification.IsValid`(읽기 전용)로 검증. 채팅 서버는 절대 토큰을 회전시키지
-    않음("서비스 제공 가능 여부는 전적으로 메인 서버한테 맡긴다"는 원칙 - `ARCHITECTURE.md`
-    참고).
-  - [완료] **`RequestChat`/`GetMyRooms`/`GetHistory` 신설** - `RequestChat`은 "관리"가
-    아니라 클라가 이미 붙어있는 채팅 서버에 직접 요청(로비를 안 거침). 채팅 서버가 내부적으로
-    (읽기 전용) `AccountServer.GetFriends`를 불러 진짜 친구 사이인지 확인 후 `roomId`를
-    결정론적으로 계산(`friend:{정렬된 두 playerId}`)해서 방 생성. `GetHistory`는 개수
-    기반 페이지네이션 - 로비/인게임 등 서버 불문 클라의 요청 형태가 통일돼 있어서 어느
-    화면에서 채팅창을 열든 같은 방식으로 씀.
-  - [완료] **`FriendRemovedSubscriber` 완성** - 이벤트 수신 시 실제로 `RemoveRoomAsync` +
-    접속 중인 양쪽에 `RoomRemoved` 알림까지 수행 (예전엔 로그만 찍는 자리표시자였음).
-  - [완료] **클라(Unity) 쪽 전체 신설** - `IChatChannel`/`WebSocketChatChannel`/`ChatClient`.
-    끊기면 지수 백오프로 스스로 재연결(인게임의 "튕기면 그냥 튕긴다"와 의도적으로 다른
-    정책 - 채팅은 반응성이 필요 없는 유틸리티 연결이라서). "오는 채팅만 받게" 만들고
-    표시 방식은 UI가 나중에 알아서 하도록 범위를 명확히 좁힘.
-  - [완료] **친구 삭제-메시지 전송 race 방어** - `RoomRemoved` 통보 이후 새는 메시지를
-    클라 쪽에서 조용히 버리는 "차단 목록" 방식(허용 목록 방식은 동기화 지연 때문에
-    정상 메시지를 잘못 거를 위험이 있어서 기각). `RoomInvited`/`RequestChatAck` 성공 시
-    차단 목록에서 제거해서 재친구 추가 시 영구 차단 안 되게 함.
-  - [완료] **`SystemChatDelivery` 프로토콜 신설** - 채팅 서버가 직접 보내는 안내(친구가
-    보낸 게 아님)를 `ChatMessageDelivery`와 완전히 다른 `oneof` 케이스로 분리. "빈
-    sender_id = 시스템 메시지" 같은 필드 값 기반 규약은 스푸핑 위험이 있어서 기각하고,
-    타입 자체가 신뢰의 근거가 되도록 설계 (`KNOWN_ISSUES.md` #9 참고). 내부에 다시
-    `oneof`(`ChatNotice`/`GlobalNotice`)를 둬서 "특정 방 종속 안내"/"방 무관 전역 안내"도
-    구조적으로 분리. **실제로 이 메시지를 보내는 서버 쪽 로직은 아직 없음(프로토콜/클라
-    수신 경로만 준비)** - 필요한 기능(예: "채팅이 금지되었습니다")이 생기면 그때 구현.
-  - **[완료] 인게임 서버에서도 친구 관리 명령어 지원** - "인게임 서버에서도 명령어로
-    친구 추가/삭제가 가능해야 한다"는 요구사항. `RoomClosed`/`TokenUpdate` 패턴 재사용:
-    `ingame.proto`에 `FriendCommandRequest`/`FriendCommandResponse`(양방향, `GameServerMessage`/
-    `GameAgentMessage`에 각각 추가) 신설. 인게임 서버(Unity)는 NGO `CustomMessagingManager`로
-    "FriendCommand" 수신 → 게임 에이전트로 릴레이 → 게임 에이전트가 `AccountServer`의
-    `GetFriends`/`AddFriend`/`RemoveFriend` 대리 호출 → 응답 역방향(`GameAgentMessage`
-    → `CustomMessagingManager` "FriendCommandResult"). **클라가 요청에 자체 신고한
-    playerId는 신뢰 안 함** - 인게임 서버가 `ConnectionApproval` 때 이미 검증해둔
-    `_clients[clientId].PlayerId`로 반드시 덮어써서 릴레이(`KNOWN_ISSUES.md` #9와 같은
-    원칙). Unity 클라 쪽(`ClientInstance`)엔 `GetFriendsInGameAsync`/`AddFriendInGameAsync`/
-    `RemoveFriendInGameAsync` 신설, `TaskCompletionSource` 기반 요청-응답(채팅과 같은
-    "한 번에 하나만" 단순화).
-  - **[미구현] `AccountServer`/계정 데이터의 진짜 DB 전환** - 지금 `InMemoryAccountRepository`는
-    여전히 더미. 친구 목록 아웃박스(`FriendEventOutbox`)도 이때 같이 DB 테이블로
-    옮겨서 진짜 트랜잭션으로 묶을 것.
-
-- **fire-and-forget 함수 예외 처리 점검 - [완료]**
-  - `_ = SomeAsync(...)`로 아무도 기다리지 않는 백그라운드 함수는, 안에서 예외가 새면
-    아무도 모르게 조용히 죽는다는 게 확인됨(`RunWithReconnectAsync`의 `Task.Delay`
-    구간이 안 감싸져 있던 게 발단). 이런 함수만 골라서 함수 전체(진입 시점부터)를
-    try-catch로 감싸도록 점검 - 오래 걸리거나 반복되는 함수뿐 아니라, 단순 1회성이라도
-    fire-and-forget이면 대상에 포함(`ReconnectToLobbyAsync` 등). 반면 호출자가
-    `await`해서 직접 결과/예외를 받는 함수(`RequestChatAsync` 등)는 내부에서 예외를
-    삼키면 오히려 호출자가 취소 여부를 모르게 되므로 제외.
-  - 점검 대상 7개 중 3개(`RunWithReconnectAsync`, `StayConnectedAsync`,
-    `SendLoopAsync`)는 일부 구간/예외 종류가 안 감싸져 있어서 보강, 1개
-    (`ReconnectToLobbyAsync`)는 아예 안 감싸져 있어서 신규 추가, 1개
-    (`SendRoomClosedAndWaitAckAsync`)는 뒷부분이 안 감싸져 있어서 보강. 나머지 2개
-    (`MatchReceiveLoopAsync`, `GrpcIngameServerChannel.ReceiveLoopAsync`)는 이미 완전히
-    감싸져 있어서 변경 없음. `SendXxxAsync`류(단순 큐잉만 하고 실제로 취소 가능한
-    await가 없는 것들)는 위험이 없다고 보고 제외.
-
-- **친구 시스템 - [완료]** (위 채팅 서버 항목과 통합됨 - 계정 확장 + 채팅방 생성/관리
-  전부 완료)
-
-- **매칭 서버 - 배관 전부 완료, 남은 건 실력 기반 알고리즘뿐**
-  - [완료] 접속 유지 스트림, 매칭↔게임에이전트 전체 RPC, 매칭 확정/취소 통보, 실제 방
-    생성/대기, 접속 끊김/서버 다운 처리 전체(`CompensatingTransaction`/`_matchLock`),
-    클라 리다이렉트, 클래스 개명(`InGameRelayService`), "Crossing 단계" 폐기 결정,
-    게임 에이전트 자체 방-채움 타임아웃(`RoomTimeout`/`PendingKill`), `EnterLobby` rate
-    limit, 매치 정상 종료→로비 복귀(`CloseRoomAndRedirectAsync`), 더미 인게임 로직
-    (`IGameLogic`/`DummyGameLogic`) - 전부 오늘까지 완료 및 실제 테스트로 검증됨.
-  - **[미구현] 실력 점수 기반 매칭 알고리즘** - 지금은 더미(1명이면 즉시 매칭). 후순위로
-    미루기로 함 (아직 게임 자체가 없어서 뭘 기준으로 매칭할지 정할 수 없음). 이때
-    `JoinMatchRequest`/`WaitingPlayer`에 이미 있는 `game_type`별로 대기열을 나누는
-    필터링도 같이 구현 필요(지금은 안 나뉘고 있음).
-
-- **로그인 서버(`LoginServer`/`AccountServer`) - 배관 완료, 검증 로직은 절반 완료**
-  - [완료] 계정 검증/생성, 세션 레지스트리 권한 획득, 매칭 서버 로비 조회, 소유권 자발적
-    이관, 클라 최초 진입 전체 흐름. Unity `ClientInstance` 연동까지 완료(실제 빌드/
-    테스트 통과).
-  - [완료] **토큰을 무작위 값으로 전환** - `DummyTokenProvider`가 예전엔 "토큰=playerId"라
-    2슬롯 대조가 실질적 효과가 없었음(누구나 playerId를 알면 토큰도 아는 셈). `Shared.Common/Auth/`로
-    이동하면서 `"{무작위값}:{playerId}"` 형식으로 개선 - `AuthInterceptor`가 여전히 파싱만으로
-    playerId를 꺼낼 수 있으면서도, 매 발급마다 값이 달라져 회전이 실제로 의미를 갖게 됨.
-  - [완료] **인게임→로비 (`EnterLobby`) 쪽 토큰 대조 검증** - `TokenVerification.IsValid`
-    (`Shared.Common/Auth/`, 순수 함수, 클라 받는 모든 서버가 공유하는 자리)로 제출된 토큰이
-    세션의 `CurrentToken`/`PreviousToken` 중 하나와 일치하는지 확인 후 통과/거부.
-    `AuthInterceptor`가 `context.UserState["token"]`에 원본 토큰도 같이 보존하도록 수정.
-    `LoginConnectionHandler`도 최초 토큰을 발급해서 세션에 심어두고(`LoginRedirect.token`)
-    클라에 전달 - 최초 진입/재접속이 같은 검증 경로로 자연스럽게 흡수됨.
-  - [완료] **로비→인게임 (`ConnectionApproval`) 쪽 토큰 대조 검증** - `ingame.proto`의
-    `ApprovalRequest`/`ApprovalResponse`에 각각 `token`/`new_token` 필드 추가, NGO 접속
-    payload를 `"{playerId}|{token}"` 형식으로 변경. `EnterLobby`와 같은 `TokenVerification.IsValid`
-    재사용. 검증 실패 시 "실제 거부"(`EnterLobby`와 같은 정책)로 확정.
-
-- **로비 생존 감지 - [완료] `StayConnected` 스트림 신설**
-  - 로비는 클라와 지속 연결이 없어서(단항 RPC만 오감), "로비에 조용히 앉아있는 클라가
-    끊겼는지"를 감지할 방법이 없었음(세션 TTL 24시간은 이 용도가 아니었음 - 아래 항목
-    참고). `StayConnected` 스트림을 `EnterLobby` 성공 직후 열어서, 연결이 살아있다는
-    사실 자체로 생존을 판단.
-  - 매치 확정으로 정상 이동 중인 경우와 구분하기 위해, 스트림 종료 시 `OwnerServerId`뿐
-    아니라 `session.Status`도 같이 확인(`Status == Lobby`일 때만 삭제) - 자세한 경위는
-    `KNOWN_ISSUES.md` #6 참고.
-  - Unity 쪽 `GrpcLobbyChannel.StayConnectedAsync`도 `EnterLobbyAsync` 성공 직후 자동으로
-    시작, 채널 Dispose 시 자연스럽게 같이 끊김.
-
-- **세션 무효화 강제 전파 - [완료] `SessionInvalidated` 이벤트**
-  - 로비/게임 에이전트가 세션을 지우는 모든 지점(로그아웃, `StayConnected` 끊김, 재접속
-    유예 타임아웃)에서 RabbitMQ로 `SessionInvalidated{playerId}` 발행. `ChatServer`가
-    구독해서 이미 무효화된 세션의 웹소켓 연결을 강제 종료 - "서비스 제공 가능 여부는
-    전적으로 메인 서버한테 맡긴다"는 원칙의 반대편 구현.
-
-- **세션 TTL(24시간) 완전 제거 - [완료]**
-  - `session:{playerId}`의 TTL 역할을 서로 다르게 이해하고 있었음이 논의 중 드러남 -
-    실제로는 갱신되는 일이 없는 "정상 정리 실패 시 최후 안전망"이었을 뿐, 개별 세션
-    생존을 능동적으로 감지하는 용도가 아니었음(그건 `server:{serverId}`의 지속 갱신
-    TTL이 담당). 자세한 경위는 `KNOWN_ISSUES.md` #5 참고.
-  - `RedisSessionRegistry`의 `UpdateAsync`/`TryClaimOwnershipWithPreviousOwnerAsync`에서
-    `EX` 옵션 제거 - 이제 세션 자체엔 TTL이 없음(영구). 개별 세션 생존 여부는 소유
-    서버의 `server:{serverId}` TTL로만 판단.
-
-- **`Server/KNOWN_ISSUES.md` 신설 - [완료]**
-  - 오늘 발견/해결한 12개 문제를 발견-원인-예상 피해-해결 방법-결과 형식으로 기록.
-    `ARCHITECTURE.md`의 "보안" 섹션도 오늘 최종 구조에 맞게 전면 갱신하고 관련 항목마다
-    상호 링크 연결.
-
-- **비밀번호 해싱 - [완료]**
-  - `AccountServer`가 비밀번호를 평문(`Password`)으로 저장/대조하고 있었음이 뒤늦게
-    발견됨. `Pbkdf2PasswordHasher`(`Shared.Common.Auth`, .NET 기본 라이브러리만 사용,
-    새 패키지 없음) 신설 - 생성 시 해싱, 검증 시 상수 시간 비교로 전환.
-    `AccountRecord.Password` → `PasswordHash`로 필드명 변경.
-
-- **TLS 도입 - [완료, 로컬 개발용 자체 서명 인증서 기준]**
-  - 서버 7개(마스터/로비/게임에이전트/매칭/계정/로그인/채팅) 전부 서버 간 통신 포함
-    적용. `KestrelEndpointExtensions.ConfigureGameServerEndpoints`(`Shared.Common.Hosting`)
-    신설 - `shared.appsettings.json`의 `"UseTls"` 값 하나로 전체 일괄 통제.
-  - **[미구현] 실배포용 정식 인증서 전환** - 지금은 `dotnet dev-certs https --trust`로
-    신뢰한 로컬 개발용 인증서 공유. 실제 도메인이 생기면 Let's Encrypt 등으로 교체 필요.
-
-- **`ChatServerInfo` 마스터 배포 - [완료]**
-  - 채팅 서버 주소가 예전엔 Unity 인스펙터에 고정값(`ws://localhost:8000`)으로 박혀있어서,
-    다른 서버 주소들(매칭/계정 등 마스터가 동적 배포)과 일관성이 없었음. `AccountServerInfo`와
-    완전히 같은 대칭 패턴(신규 등록 시 브로드캐스트 + 기존 등록자 캐치업)으로 배포하도록
-    변경 - 로그인 서버/채팅 서버가 어느 순서로 뜨든 문제없음. `login.proto`의
-    `LoginRedirect`에 `chat_address` 필드 추가, 로그인 성공 응답에 실어서 클라에 전달.
-    Unity `ClientInstance`의 `_chatAddress` 고정 필드 제거.
-
-- **마스터→메인 서버 지시 전달 구조 - [완료] `Shutdown` 업무까지, 확장 구조 확립**
-  - 논의 끝에 방향이 완전히 바뀜: 클라 대상 운영 공지가 아니라 **"마스터가 특정 메인
-    서버(들)한테 특정 업무를 시키는" 것**이 목적으로 확정됨. 기존 `MasterCommand`
-    (`BroadcastRelay`/`DrainSignal`)는 이 목적과 안 맞아서 완전히 제거하고 새로 설계.
-  - **핵심 설계 결정**: "누구한테 보낼지"(특정 인스턴스/특정 서버 타입/전체)는 메시지
-    안에 안 담는다 - 그건 마스터가 발행하는 순간(`/admin/shutdown` 엔드포인트)의 판단일
-    뿐, 받는 서버는 자기가 어떻게 선택돼서 그 메시지를 받았는지 몰라도 되고 알 필요도
-    없다. 타겟 해석은 마스터 쪽(`InstanceRegistry.Enqueue`/`GetByType`/`Broadcast`)에서만
-    일어나고, 실제로 나가는 메시지(`MasterServerInstruction`)엔 업무 내용(`task`
-    `oneof`)만 실림 - 확장 지점을 여기 하나로 좁혀서, 새 업무 종류가 생기면 이 `oneof`에
-    케이스만 추가하면 됨.
-  - `MasterMessage.instruction`(기존 `command` 필드 번호 재사용)으로 전달 - 마스터↔메인
-    서버 간 이미 있던 상시 스트림(하트비트/주소 배포 등과 같은 통로)을 그대로 씀, 새
-    연결 불필요.
-  - `MasterConnectionService`가 기본 동작(유예 시간 대기 후 `IHostApplicationLifetime.StopApplication()`)을
-    수행하고, 서버 타입별로 종료 전 정리할 게 있으면(예: 매칭 서버는 신규 대기열 거부)
-    `OnShutdownRequested` 이벤트를 구독해서 커스터마이즈할 수 있는 확장 지점도 마련해둠
-    (아직 실제로 구독하는 서버는 없음 - 필요해지면 추가).
-  - `MasterServer/Program.cs`의 `/admin/shutdown` 엔드포인트로 `instanceId`/`serverType`/
-    (둘 다 없으면 전체) 중 하나를 골라 타겟 지정 - 실제로 `ChatServer` 인스턴스 하나를
-    대상으로 종료까지 성공적으로 검증함(패치 배포 시 수동으로 서버들 끄던 것을 이걸로
-    대체할 수 있는 첫걸음).
-  - `KestrelEndpointExtensions`에 단일 포트용 오버로드 추가(`MatchingServer`처럼 REST
-    보조 포트가 없는 서버용) - TLS 작업 때 이 서버를 놓쳤던 걸 여기서 발견하고 같이 정리.
-  - **[미구현] `Drain`(드레인) 업무** - 원래 있던 `DrainSignal` 개념은 이번에 같이
-    제거됨. 신규 매칭/접속 접수를 실제로 중단시키는 로직은 서버 타입별로 다르게
-    설계해야 함(매칭 서버의 대기열 등록 거부, 로비의 `EnterLobby` 거부 등) - 필요해지는
-    시점에 `task` `oneof`에 새 케이스로 추가하면 됨, 지금 구조가 이미 그 확장을 전제로
-    설계돼 있음.
-  - **참고**: `ingame.proto`의 `GameAgentMessage.drain`(게임 에이전트→유니티 릴레이용)은
-    이번 정리와 무관하게 원래부터 아무 코드도 안 채우던 죽은 필드였음 - 나중에 `Drain`
-    업무를 실제로 설계할 때 같이 정리할 것.
-
-- **우편함(Mail) 시스템 - 설계 확정, 구현 진행 중**
-  - 발단: `DummySubServer`가 처리 후 클라한테 어떻게 알리는지 논의하다가, "실시간 push가
-    유일한 전달 수단이면, 그 순간 재접속 중이던 클라는 영원히 못 받는다"는 문제 발견.
-    업계 조사 결과 "메일함/인박스" 패턴이 표준 해법(Heroic Labs, Unity, LootLocker 등
-    다수의 게임 백엔드가 이 패턴 사용) - 실제 상태 변경(보상 지급 등)은 영속 기록,
-    알림은 best-effort, 클라는 언제든 재조회로 만회 가능.
-  - **핵심 설계 결정 - 왜 채팅 서버가 아니라 `AccountServer`가 메일함을 담당하는가**:
-    메일 "개봉"이 단순 열람이 아니라 보상 지급이 같이 일어나는 경제적 트랜잭션이기
-    때문. 지급과 열람 시점이 어긋나면(예: 미리 지급해두고 메시지만 나중에) 캐시성
-    보상의 경우 "현질했는데 어디 갔냐"는 CS 분쟁으로 이어질 수 있음 - 그러니 "수령"은
-    메시징(채팅)이 아니라 계정 데이터를 원자적으로 다루는 `AccountServer`가 책임져야
-    함. 채팅 서버는 이 역할을 맡을 자격 자체가 없다고 결론.
-  - **DB 표현 관련 논의**: "SQL이 표현 가능한가"는 사실상 항상 참(관계형+JSON 컬럼
-    조합으로 못 담을 구조가 거의 없음) - 진짜 질문은 "이 데이터의 접근 패턴에 뭐가
-    맞는가"였음. 우편함은 영속성이 핵심 + 관계형 쿼리(플레이어별 목록 조회)가 자연스러움
-    + 수령이 "정확히 한 번" 보장돼야 함(ACID 트랜잭션) - SQL이 잘 맞는 사례로 결론.
-    첨부물(가변적 구성)은 실제 MMO DB 스키마 사례(`mail`+`mail_attachments` 정규화
-    테이블, 경매장 낙찰 시 이 구조로 우편 전달)와 JSON 컬럼 두 방식을 조사했고
-    **JSON 컬럼 채택** - 대신 자주 필터링할 값(`recipient_id`, `mail_type`, 수령 여부)은
-    JSON 밖 일반 컬럼으로 빼서 인덱스가 먹게 함. 첨부물 세부 구성만 JSON에 담음.
-  - **용량 논의**: 한 유저 우편함이 무한정 쌓이는 상황은 애초에 정상적인 운영이 아님
-    (업계도 상한선+오래된 것부터 밀어내기, 소비기한 부여로 방지). ①상한선+밀어내기
-    정책 채택, ②클라는 절대 전체를 한 번에 안 받고 개수 기반 페이지네이션(오늘 채팅
-    `GetHistory`와 같은 패턴)으로 조회.
-  - **전체 흐름 (최종 확정)**:
-    1. 메인 서버 → 하위 서버: RabbitMQ로 지시 하달(기존 `game-events`/`match-results`/
-       `reward-queue` 큐 재사용).
-    2. 하위 서버가 처리 후 `AccountServer.GrantMail` 호출(원본 이벤트 ID로 멱등성
-       보장 - 재시도로 같은 메일이 중복 지급되지 않게).
-    3. `AccountServer`가 적용 완료 통지.
-    4. 하위 서버가 세션 레지스트리로 그 플레이어를 지금 누가 관리 중인지(`OwnerInfo`) 조회.
-    5. 있으면(접속 중이면) 그 서버한테 **"클라1한테 우편물 제공"이라는 신호만** 전달
-       (실제 우편 내용은 안 실음 - 그 서버가 직접 다시 조회하게 해서, "접속 시 자동
-       제공"이랑 완전히 같은 경로를 재사용). 없으면(로그아웃 상태) 아무것도 안 함 -
-       다음 접속 시 자동 제공이 안전망.
-    6. 신호 받은 메인 서버가 `AccountServer.GetMailList`를 직접 조회해서 그 즉시 클라한테 전달.
-    7. **모든 메인 서버는 클라 접속 시점에 항상 자동으로 우편함을 제공**해야 함(공통
-       규약) - 4~6번이 어떤 이유로든 실패해도(하위 서버 다운 등) 이게 최종 안전망이라,
-       4~6번은 "이미 온라인인 사람한테 재접속 기다리지 않고 알려주는" best-effort
-       최적화일 뿐 크리티컬 경로가 아님.
-    8. 클라가 메일 클릭 → "열겠습니까?" 확인창 → 확인 시 `mailId`로 `OpenMail` 요청 →
-       `AccountServer`가 그 순간 재검증(만료/중복수령 여부) 후 원자적으로 수령 처리 +
-       보상 지급, 결과 반환.
-  - **`mailId` 기반 식별 - 클라 UI 안정성의 핵심**: 목록이 백그라운드에서 갱신돼도(새
-    메일 도착 등) 기존에 뜬 확인창/버튼이 가리키는 메일이 안 바뀌어야 함 - "몇 번째
-    항목" 같은 위치 기반이 아니라 `mailId`(안정적 식별자)로 항상 참조. 클릭 핸들러도
-    객체 참조가 아니라 `mailId` 문자열만 캡처해야 함(딕셔너리가 통째로 교체돼도 키는
-    유효). 클라 내부 자료구조는 `Dictionary<mailId, MailInfo>`가 진짜 데이터이고, UI에
-    보이는 "날짜순 정렬된 목록"은 그 딕셔너리에서 매번 파생시키는 뷰로 다뤄야 함(별도로
-    유지관리하는 정렬 리스트를 따로 안 둠 - 어긋날 여지 자체를 구조적으로 없앰).
-    서버 측 재검증(8번)과 합쳐지면, 어떤 타이밍에 뭐가 어긋나도 클라한테 "없는
-    메일입니다" 같은 당황스러운 에러 없이 명확한 사유(이미 수령됨/만료됨 등)로
-    처리됨.
-  - **[완료] 서버 측 배선 전체** - `account.proto`(Mail RPC 3종), `AccountServer`(영속
-    저장 + 멱등 처리 + 원자적 수령), `common.proto`(`ServerType.SubServer` 추가),
-    `DummySubServer`가 처음으로 마스터/세션 레지스트리에 접속하도록 확장,
-    `lobby.proto`/`ingame.proto`에 "우편물 제공 신호" 채널 신설.
-    `PlayerSession.OwnerServerType`/`OwnerInfo.ServerType` 추가(하위 서버가 로비인지
-    게임 에이전트인지 구분하기 위함) - `LobbyControlService.EnterLobby`/
-    `GameServerHandler.HandleApprovalRequestAsync`가 채움.
-    `DummySubServer.MailGranter`(지급+알림 헬퍼) + `DummyRabbitMqConsumer`가
-    `reward-queue` 메시지를 실제로 파싱해서 지급까지 하는 완전한 예시로 완성됨 -
-    `DummyKafkaConsumer`(`game-events`/`match-results`)는 아직 로그만 남기는 원래
-    상태로 남겨둠, 필요해지면 `RabbitMqConsumer`와 같은 패턴(멱등 파싱→`MailGranter`
-    호출) 그대로 적용하면 됨.
-    **로비/게임 에이전트 양쪽 다** "접속 시 자동 제공"(안전망) + "하위 서버 신호로
-    즉시 제공"(best-effort 최적화) 경로가 대칭적으로 완성됨 - 로비는 `StayConnected`
-    채널(동시 쓰기 방지를 위해 `Channel<T>` 기반으로 재작성), 게임 에이전트는
-    `GameServerInfo.GetClientId`로 접속 여부 확인 후 `GameAgentMessage.MailProvided`로
-    Unity까지 릴레이(`IngameServerInstance`가 다시 NGO `CustomMessagingManager`로
-    실제 클라 앞까지 전달).
-  - **[미구현] 상한선 + 밀어내기 정책** - `InMemoryMailRepository`는 아직 무제한으로
-    쌓임. 실제 DB 전환 시 같이 구현할 것(업계 사례 참고 - 예: 최대 100개, 꽉 차면
-    가장 오래된 것부터 삭제).
-  - **⚠⚠⚠ [미구현, 반드시 신중히] 클라이언트(Unity) 쪽 UI 연동 ⚠⚠⚠**
-    **이건 단순 배선 작업이 아니라 실제 게임 UI(우편함 화면, 메일 클릭→확인창→개봉
-    흐름, 알림음/배지 등)와 밀접하게 엮인 작업이다.** 오늘 서버 쪽에서 확정한 원칙
-    (`mailId` 기반 식별, 딕셔너리를 진짜 데이터로 두고 정렬 리스트는 파생 뷰로만 사용,
-    클릭 핸들러는 객체가 아니라 `mailId` 문자열만 캡처)을 클라 UI 코드가 정확히 지키지
-    않으면, 오늘 길게 논의해서 막아둔 "확인창 떠있는 동안 배경이 갱신되는" 류의 race가
-    실제로 터질 수 있다. **UI 설계/구현과 반드시 같이 논의해서 진행할 것 - 서버 쪽
-    배선만 보고 성급하게 클라 코드부터 짜지 말 것.**
+- **로그인 서버 = "갈 곳을 잃은 클라"를 위한 안정적 단일 조회 창구 - 설계 확정, 구현 전**
+  - **발단**: 인게임→로비 전환 중 `RoomClosed`(전입 티켓 포함)를 클라가 못 받는 경우
+    (네트워크 완전 단절 등), 서버 쪽(세션, 전입 티켓 등록)은 이미 정리가 다 끝났는데
+    클라만 갈 곳을 모르게 됨. 지금 `LoginConnectionHandler`는 이미 살아있는 소유자가
+    있으면(`TryClaimOwnershipWithPreviousOwnerAsync` 실패) 그냥 `SESSION_CONFLICT`로
+    거부해서, 클라가 이 경로로 복구할 방법이 없었음.
+  - **업계 사례 조사**: AWS GameLift의 서버리스 매치메이킹 - 클라는 특정 서버 주소를
+    직접 캐시/재시도하지 않고, 항상 안정적인 단일 창구(API Gateway)한테 "지금 상태
+    뭐야"를 물어봄. 그 창구가 내부적으로 상태 저장소(DynamoDB)를 조회해서 알려주는
+    구조. 이 철학을 그대로 가져옴 - **우리 시스템에서 그 "안정적 단일 창구" 역할이
+    로그인 서버, "내부 상태 저장소" 역할이 세션 레지스트리(Redis)**에 대응.
+  - **최종 확정된 흐름**:
+    1. 클라가 (어떤 경로로든) 접속이 끊김.
+    2. **재접속 가능한 방에서 순간적으로 끊긴 경우만 예외** - 기존에 갖고 있던 인게임
+       주소로 직접 재시도(빠른 경로, 이미 있는 `ConnectionApproval` 토큰 대조 복귀
+       메커니즘 그대로 유지 - 목적지가 아직 살아있다는 게 전제인 시간 민감한 경우라
+       로그인 서버를 거치면 오히려 손해).
+    3. 그 외 모든 경우(로비는 재접속 개념 자체가 없으니 무조건 / 재접속 불가능한 방 /
+       2번 시도가 접속 거부로 실패) → 클라가 로그인 서버한테 `playerId` + **세션
+       토큰**(계정 자격증명 재인증 아님 - 매번 아이디/비번 재입력은 사용성 문제)을 제출.
+    4. 로그인 서버가 세션 레지스트리 조회 - 살아있는 소유자가 있으면(`OwnerServerId` +
+       그 서버의 하트비트 TTL 확인) 토큰 대조 후 그 주소로 안내만 함(소유권 자체는
+       안 건드림, 로그인 서버가 다시 클레임할 필요 없음). 소유자가 없으면(세션 자체가
+       없거나 소유 서버 하트비트 만료) 완전히 새로 시작(기존 로직 그대로, 새 로비 배정).
+    5. **"목적지 서버가 죽었다"는 판단은 클라가 직접 접속 시도 실패로 알게 되는 것**이지,
+       로그인 서버가 능동적으로 감지해서 알려주는 게 아님 - 로그인 서버는 그냥 다음
+       조회 시점에 세션 레지스트리의 하트비트 TTL이 자연스럽게 만료된 걸 보고 판단.
+  - **번외 - 이동 중 도착지 서버가 죽거나 회전 토큰(`CurrentToken`/`PreviousToken`)
+    2개 다 만료된 "대참사" 시나리오**: 클라가 접속 거부당해서 로그인 서버로 가면,
+    로그인 서버 입장에선 세션 레지스트리에 유효한 기록이 없어 보일 수 있어(도착지
+    서버 죽음의 경우 그 서버 하트비트 TTL이 아직 안 끝났을 수도 있음) 완전히 새로
+    로그인해야 하는 상황이 될 수 있음. **근데 이 경우 클라가 자동으로 즉시 로그인
+    서버로 재시도하는 게 오히려 안 좋을 수 있다는 결론**:
+    - 서버 죽음 케이스: 세션 레지스트리가 "죽었다"고 실제로 판단하려면 그 서버의
+      하트비트 TTL이 자연스럽게 만료될 시간이 필요함 - 클라가 그 전에 즉시 재시도해봤자
+      의미 없음.
+    - 토큰 2개 다 만료 케이스: 이게 일어났다는 건 서버가 그 사이 두 번이나 회전할
+      만큼 응답이 느렸다는 뜻(서버가 바쁘다는 신호) - 이 순간 클라가 자동으로 즉시
+      재접속을 쏟아내면 이미 부하 걸린 서버에 기름을 붓는 꼴.
+    - **그러니 이 "대참사" 케이스는 자동 복구 로직을 만들지 말고, 그냥 클라 화면에
+      "연결이 끊겼습니다"만 띄우고 사람이 직접 재시도(버튼 등)하게 두는 게 낫다는
+      결론** - 사람이 누르기까지의 지연 자체가 (1) TTL이 자연스럽게 만료될 시간을
+      벌어주고 (2) 서버 부하 완화(자연스러운 스로틀링) 효과가 있음. 아직 구현 전,
+      클라 UI 설계 시 이 판단 기준(재접속 가능 방 순간 끊김만 자동 재시도, 나머지는
+      사람 개입 필요)을 반영할 것.
+  - **로그인 서버 자체가 몰려서 응답 불가 상태가 되는 경우도 같은 원칙** - 이건
+    "최후의 안전망"(로그인 서버)마저 없어진 셈이라 목적지 서버 하나 죽는 것보다
+    더 심각함. **두 가지를 명확히 구분해야 함**:
+    - **로그인 서버가 정상 응답했지만 요청을 거부한 경우**(자격증명 틀림 등) - 연결을
+      끊지 않고, 그냥 화면에 사유를 안내만 함(다시 입력하면 바로 재시도 가능한 정상
+      흐름). 이건 "연결 실패"가 아니라 "입력 오류"라 성격이 다름.
+    - **로그인 서버와의 연결 자체가 실패한 경우**(타임아웃/거부) - **클라는 원인을
+      알 방법이 없음**(자기 쪽 네트워크 문제인지, 로그인 서버가 몰려서인지 구분 불가).
+      그러니 "잠시 후 다시 시도해주세요"처럼 원인을 안다는 전제가 깔린 조언조차
+      붙이면 안 되고, **의도적으로 뭉뚱그린 표현**("서버에 접속할 수 없습니다" 등)만
+      띄움. 위 "대참사" 원칙과 동일하게 자동 재시도 없음 - 이미 몰려있는 로그인
+      서버한테 클라들이 자동으로 재시도를 쏟아부으면 복구가 더 늦어짐.
+  - `ARCHITECTURE.md`의 "서버 이동과 재접속" 섹션에 상세 기록.
+- **Unity 클라/게임 서버 스크립트의 스레드 안전성 - 암묵적 전제에 의존 중** - `GrpcLobbyChannel`/
+  `GrpcIngameServerChannel`/`WebSocketChatChannel`의 이벤트(`OnMatchFound`,
+  `OnMailProvided` 등)를 구독하는 `ClientInstance`/`IngameServerInstance`의 핸들러들이
+  유니티 API(`NetworkManager`, `RoomManager` 등)를 직접 건드리는데, 이게 항상 메인
+  스레드에서 실행된다는 보장이 **명시적 검증이 아니라 "코드 어디에도 `ConfigureAwait(false)`/
+  `Task.Run`이 없다"는 암묵적 사실 하나에 전적으로 의존**하고 있음(전수 검색 결과 현재는
+  없음 확인됨 - 유니티의 `SynchronizationContext`가 `await` 재개 지점을 메인 스레드로
+  돌려주는 표준 동작에 의존). 문제는: (1) `ConfigureAwait(false)`는 일반 .NET 개발/라이브러리
+  코드에서 흔한 관례라 나중에 무심코 추가되면 컴파일 에러 없이 조용히 깨짐, (2)
+  `Grpc.Net.Client`/`YetAnotherHttpHandler` 등 외부 라이브러리 내부 구현에 있을 가능성도
+  배제 못 함(버전업 시 흔들릴 수 있음). 명시적 방어(예: 델리게이트 호출부에 메인 스레드
+  여부 검증)를 추가할지, 아니면 지금처럼 암묵적 전제로 둘지 미정.
+- **로비는 재접속(재개) 개념 없음 - 확정** - 인게임은 `GetAllowReconnect(gameType)`이
+  있는 방은 끊겨도 세션/방 상태를 그대로 두고 재접속 시 이어서 진행하지만, 로비는
+  `StayConnected`가 끊기면(순간적인 네트워크 블립이라도) 유예 없이 그 즉시 세션을
+  지운다(`HandleStayConnectedEndedAsync`) - 이 비대칭을 없애는 대신, 위 "로그인 서버
+  = 안정적 단일 조회 창구" 흐름으로 흡수하기로 결정. 매칭 대기 중(`RequestMatch` 스트림
+  보유 상태) 순간 끊김도 대기열에서 바로 빠지는(`RequestLeaveMatchAsync`) 채로 유지 -
+  재접속 시 대기열 자리 복원 기능은 만들지 않음.
+- **`AccountServer`/계정 데이터의 진짜 DB 전환** - `InMemoryAccountRepository`/
+  `InMemoryMailRepository` 전부 여전히 더미. 친구 목록 아웃박스(`FriendEventOutbox`)도
+  이때 같이 DB 트랜잭션으로 묶을 것.
+- **실력 점수 기반 매칭 알고리즘** - 지금은 더미(1명이면 즉시 매칭). `JoinMatchRequest`의
+  `game_type`별 대기열 분리도 이때 같이 구현.
+- **실배포용 정식 TLS 인증서** - 지금은 로컬 개발용 자체 서명 인증서(`dotnet dev-certs`)
+  공유 중. 실제 도메인 생기면 Let's Encrypt 등으로 교체.
+- **마스터 지시(`MasterServerInstruction`)의 `Drain` 업무** - `Shutdown`만 구현됨. 신규
+  접속/매칭 접수를 서버 타입별로 다르게 중단시키는 로직 필요(매칭 서버 대기열 거부,
+  로비 `EnterLobby` 거부 등). `task` `oneof`에 새 케이스 추가하면 됨 - 확장 구조는 이미
+  갖춰져 있음. `ingame.proto`의 죽은 필드 `GameAgentMessage.drain`도 이때 같이 정리.
+- **게임 에이전트의 유니티 프로세스 슈퍼바이저화** - 지금은 게임 에이전트/인게임 서버가
+  완전히 독립된 프로세스로 뜸. 나중에 게임 에이전트가 유니티 `.exe`를 자식 프로세스로
+  직접 스폰/재시작하는 구조로 갈 예정 - 지금의 하트비트 비대칭(인게임은 게임 에이전트
+  끊기면 자기 종료, 게임 에이전트는 안 죽고 버팀)이 이 미래 구조의 전제 조건.
+- **우편함 - 상한선 + 밀어내기 정책** - `InMemoryMailRepository`가 무제한으로 쌓임. DB
+  전환 시 같이 구현(예: 최대 100개, 오래된 것부터 삭제).
+- **⚠⚠⚠ 우편함 - 클라이언트(Unity) UI 연동 ⚠⚠⚠** 서버 배선은 전부 완료(로비/게임
+  에이전트 양쪽 접속 시 자동 제공 + 신호 즉시 제공 + 클라 능동 조회, `AccountServerIntermediary`
+  리팩터까지 완료). **`ClientInstance.cs`의 실제 수신/UI(메일함 화면, 클릭→확인→개봉,
+  알림음/배지)는 의도적으로 미착수.** `mail_id` 기반 식별(위치가 아니라 안정적 ID로
+  참조), 딕셔너리를 진짜 데이터로 두고 정렬 리스트는 파생 뷰로만 사용 - 이 원칙을 UI
+  코드가 안 지키면 "확인창 떠있는 동안 배경 갱신" 류의 race가 실제로 터질 수 있다. UI
+  설계와 반드시 같이 논의해서 진행할 것.
+- **`ShutdownNotice`(옛 정상/비정상 종료 구분용) 미발신** - `MasterConnectionService`에
+  `StopAsync` 오버라이드가 없어서 이 메시지가 한 번도 안 나감(항상 "비정상 종료"로만
+  로그 남음). 우선순위 낮음 - `start/stop-servers.ps1`로 테스트하는 지금 단계엔 안 급함.
+- **서킷 브레이커 / Redis Sentinel·Cluster** - 운영 환경 고가용성 확보용, 개발 단계에선
+  단일 Redis로 충분. 구현 방식/폴백 동작은 미정.
 
 ---
 
-## 구현 완료
+## 알려진 구조적 한계 (완화만 가능, 완전히 없앨 수 없음)
 
-- [완료] **로그인 서버(`LoginServer`) + 계정 서버(`AccountServer`) 신설**
-  - `common.proto`에 `ServerType.LOGIN`/`ServerType.ACCOUNT` 추가.
-  - `master.proto`: `AccountServerInfo` 신설. **의도적으로 매칭 서버 주소랑 같은
-    "필드별 명시적 하드코딩" 방식** - 범용 `Dictionary<ServerType, string>`/`InfrastructureAddress`
-    같은 통합 구조로 안 감. 이유: 통합하면 "이 서버 주소를 빠뜨려도 컴파일이 통과하는"
-    문제가 생기는데, 각 인프라마다 전용 필드를 두면 필수 주소 빠뜨림을 스키마 차원에서
-    방지할 수 있음(코드 리뷰/컴파일 단계에서 놓치기 어려워짐). `MasterConnectionService`/
-    `ConnectionHandler`에 매칭 서버와 완전히 같은 패턴으로 배선 완료.
-  - **`AccountServer`**: 계정 검증/생성 전담, 단항 RPC만(매칭 서버와 달리 서버 풀 관리가
-    아니라 순수 조회/생성 저장소라 접속 유지 스트림 불필요). `IAccountRepository` +
-    `InMemoryAccountRepository`(`AccountServer/Debug/`, 아직 SQL 없음) 패턴. `playerId`는
-    계정 생성 시 GUID 발급, 충돌 방어용 재발급 루프(최대 5회 - 실질적으로 거의 발생 안 함).
-  - **`LoginServer`**: 클라 최초 진입점 전용, 스트림 기반(`MasterControl.Connect`와 같은
-    패턴 - "일정 시간 안 제출 안 하면 끊는다"를 구현하려면 단항 RPC로는 안 됨). 흐름:
-    접속 → 계정 정보 제출 대기(30초 타임아웃) → AccountServer 대조/생성 → 세션 레지스트리
-    관리 권한 획득 → 매칭 서버에 로비 주소 요청 → 성공 시 소유권 자발적 이관(게임 에이전트의
-    `CloseRoomAndRedirectAsync`와 같은 패턴) + 클라에 리다이렉트 지시 → 스트림 종료.
-    **JWT/재접속 개념이 아예 없음** - 로그인 성공한 클라는 이 서버로 다시 안 오고,
-    연결이 끊기면 어느 단계에서든 그냥 끊긴 걸로 끝(복구/재시도 로직 없음).
-  - 매칭 서버가 갈 수 있는 로비를 못 찾으면 `LoginRejected{reason="NO_LOBBY_AVAILABLE"}`
-    로 거부 - "서버가 가득 찼습니다" 케이스.
-  - [완료] **Unity 클라 쪽 연동** - `ILoginChannel`/`GrpcLoginChannel` 신설, `ClientInstance.Start()`가
-    로그인 서버 경유하도록 재작성 완료. `LoginServer.Contracts.csproj`에 Unity 복사 빌드
-    타겟 누락돼있던 것도 발견해서 추가함.
-  - [완료] **전체 엔드투엔드 테스트 성공** - 클라 로그인(계정 생성) → 로비 주소 수신 →
-    EnterLobby → RequestMatch → 매치 확정 → NGO 인게임 접속 → 게임 진행(더미) → 방 종료
-    지시 → 클라 자진 이탈 → 새 로비 재접속까지 로그로 전부 확인함.
-  - **[해결됨] `HTTP_1_1_REQUIRED` 오류** - `LoginConnectionHandler`가 `AccountServer`/
-    매칭 서버를 단항 RPC로 호출할 때 평문(TLS 없음) HTTP/2에서 이 오류가 재현됐다.
-    `GrpcChannel.ForAddress(address)`(기본 핸들러)만 쓰면 실패하고, `MasterConnectionService`가
-    쓰는 것과 동일하게 `SocketsHttpHandler`를 명시적으로 구성해서 `GrpcChannelOptions.HttpHandler`에
-    넘기면 해결됨 - 정확한 내부 메커니즘은 규명 못 했지만(같은 프로세스 내 다른 단항 호출은
-    기본 핸들러로도 잘 되는 사례가 있어서 원인이 더 미묘함), 재현 가능한 해법은 확보함.
-    **비슷한 오류가 다른 곳에서도 나면 이 패턴(`CreateChannel` 헬퍼, `LoginConnectionHandler.cs`
-    참고)을 우선 적용해볼 것.**
-    (참고: 도중에 Kestrel을 `Http1AndHttp2`로 완화해봤는데 이건 답이 아니었음 - TLS 없는
-    환경에서 `Http1AndHttp2`는 ALPN 협상 채널이 없어서 Kestrel이 그냥 HTTP/1.1로 확정해버림.
-    `Http2` 단독이 h2c로 정확히 동작하는 올바른 설정이었고, 그대로 유지함.)
-  - **[확인 필요]** 이번 스캐폴딩(csproj, appsettings.json, `.slnx`)은 이번 세션 스크래치
-    공간 리셋으로 정확한 로컬 원본이 없어서, 다른 메인 서버 프로젝트 패턴을 참고해
-    재구성함. 로컬의 다른 프로젝트 설정과 다른 부분 없는지 확인 필요.
-  - **포트 배정**: `AccountServer` 5500/5501, `LoginServer` 5400/5401 (`DummySubServer`가
-    이미 5300을 쓰고 있어서 처음 배정했던 5300과 충돌났던 적 있음 - 새 서버 포트 잡을 땐
-    `start-servers.ps1`/기존 서버들 전체와 대조 필수). `start-servers.ps1`/`stop-servers.ps1`에
-    두 서버 추가 완료 (마스터→매칭 다음, DummySubServer 이전 순서).
+이 경합들은 "판단 시점"과 "실행 시점" 사이에 물리적으로 시간이 걸려서 생기는 것들이라,
+비동기 이벤트 체인으로는 창을 0으로 만들 수 없다. 실질적 위험(데이터 오염, 보안 구멍)은
+없고 전부 "아깝게 놓쳐서 다시 시도"하는 정도로 우아하게 처리되므로 그대로 감수하기로
+결정함.
 
+- **재접 불가능 방에서 "나감 처리" vs "재접속 시도"** - 클라가 끊긴 순간부터 서버 정리가
+  끝날 때까지 그 찰나에 클라가 로비에 `EnterLobby`를 부르면 무의미한 안내를 받을 수 있음.
+  `EnterLobby` rate limit은 이 경합을 없애는 게 아니라 순수 남용 방지용.
+- **게임 에이전트 방-채움 타이머 만료 vs 마지막 클라의 NGO 접속 완료** - 타이머 만료
+  판정과 `OnClientConnected` 콜백이 같은 찰나에 겹치면, 방금 접속한 클라도 리다이렉트
+  대상으로 취급될 수 있음.
+- **친구 삭제 vs 메시지 전송** - `RoomRemoved` 통보 이후 새는 메시지 한 통이 있을 수
+  있음. 클라(`WebSocketChatChannel`)가 통보 이후 메시지를 조용히 버리는 "차단 목록"
+  방식으로 창을 좁힘.
+- **클라 자진 이탈 vs 서버 강제 종료(게임 종료 후 로비 복귀)** - `IngameServerInstance._clients`의
+  `ConcurrentDictionary` 원자성으로 방어됨, 실질적 위험 없음.
+- **`SessionInvalidated` 발행-소비 지연** - 로비 정리와 채팅 서버 재접속 검증 사이의
+  틈. `RemoveAsync`와 발행이 같은 메서드에서 연달아 실행돼서 "영구 잔류"가 아니라
+  "잠깐 살아있다가 뒤늦게 정리"로 귀결됨.
 
-- [완료] **인증 체계 임시 개편 (3번 결정) + 세션 레지스트리 토큰 2슬롯 (1번 결정)**
-  - `Login`/`CreateAccount`를 코드에서 완전히 제거 (별도 "로그인 서버"로 분리하는 게
-    맞는 방향이지만 그건 나중 작업 - `TODO`에 미결로 남김). `EnterLobby`부터 토큰이
-    필요한 임시 상태가 됨.
-  - `DummyTokenProvider` 단순화: 어떤 문자열이든("1"이든 "12312"든) 그대로 playerId로
-    취급하고 통과시킴. `GenerateToken`도 `playerId`를 그대로 반환 - 발급/검증 둘 다
-    "토큰 = playerId"로 일관.
-  - `PlayerSession`에 `CurrentToken`/`PreviousToken`(2슬롯) + `TokenIssuedAtUnixMs`
-    (TTL 판단용) 필드 추가. 갱신 권한은 `OwnerServerId`를 가진 서버만.
-  - `EnterLobby`가 성공할 때마다 기존 `CurrentToken`을 `PreviousToken`으로 밀어내고
-    새 토큰을 발급, `EnterLobbyResponse.token`으로 돌려줌.
-  - 클라(`ClientInstance`)는 최초 접속 시 스스로 만든 토큰(`"test_player"` 그대로)을
-    `LobbyClient.SetToken`으로 주입해 `EnterLobby`를 부르고, 성공 시 받은 토큰을
-    `_cachedToken`에 저장 - 이 필드는 `LobbyClient`/`GrpcLobbyChannel`이 게임 세션마다
-    Dispose되고 새로 만들어져도 살아남아서, 게임 종료 후 새 로비로 돌아갈 때 재사용됨.
-  - [완료] **토큰 2슬롯 실제 대조 검증** - 당시엔 미구현이었으나, 이후 `EnterLobby`/
-    `ConnectionApproval` 양쪽 다 `TokenVerification.IsValid`로 구현 완료(위 "로그인
-    서버" 항목 참고). 또한 이 시점의 "토큰=playerId" 스킴 자체도 나중에 무작위값으로
-    교체됨(`KNOWN_ISSUES.md` #2).
+---
 
-- [완료] **게임 종료 후 클라 로비 복귀 - 실제 재접속까지 확인**
-  - `ClientInstance.OnRoomClosedMessageReceived`가 `RoomClosed` 메시지 받으면: 확인
-    응답 전송 → **서버 응답을 안 기다리고 즉시 스스로 NGO 연결 종료** → 리다이렉트
-    주소가 있으면 `ReconnectToLobbyAsync`로 새 로비에 `EnterLobby`까지 자동 시도.
-  - `ARCHITECTURE.md`에 "클라 자진 이탈 vs 서버 강제 종료" 경합 기록함 - 실질적
-    위험은 없음(`IngameServerInstance._clients`의 `ConcurrentDictionary` 원자성으로
-    이미 방어됨, `Update()`의 `RedirectDisconnect` 처리에 `ContainsKey` 가드 추가).
-  - `LobbyState.LoggedIn` 제거 (Login이 없어져서 `Connected`에서 바로 `EnterLobby`
-    가능해짐).
+## 구현 완료 (요약)
 
+### 인프라 / 마스터 서버
+- Redis 세션 레지스트리(`TryClaimOwnershipAsync` 원자적 권한 이전, 서버 생존 TTL 기반
+  - 세션 자체 TTL은 폐지), `SessionRegistryConnector`(지연 연결 프록시 패턴).
+- 마스터가 매칭/계정/채팅 서버 주소를 전 서버에 동적 배포(대칭 패턴: 신규 등록 시
+  브로드캐스트 + 기존 등록자 캐치업, 순서 무관).
+- **마스터→메인 서버 지시(`MasterServerInstruction`)**: `Shutdown` 업무 구현 및 실제
+  검증 완료(`/admin/shutdown`, 인스턴스/타입/전체 타겟 지정). 타겟 정보는 메시지에
+  안 담고 발행 시점에만 판단.
+- `RegistryCleanupServer`/마스터의 `RequestIngameAssignment` 등 죽은 코드 정리 완료.
+- **TLS 전체 서버 적용**(로컬 개발 인증서 기준), `KestrelEndpointExtensions`로
+  `shared.appsettings.json`의 `UseTls` 값 하나로 일괄 통제.
 
-- [완료] **디버그/더미 코드 한 자리에 모으기 컨벤션 확립**
-  - Unity: `AutoBattler.Game.Dummy` 네임스페이스(`Server/Game/Dummy/`) - `Debug`란 이름은
-    `UnityEngine.Debug`랑 충돌해서 `Dummy`로 채택. `IGameLogic`(인터페이스, `Server/Game/`)
-    + `DummyGameLogic`(구현체, `Dummy/`) 완료 - "방 전원 접속 완료" 시 `RoomManager`가
-    `GameManager.NotifyMatchStart`를 통해 트리거, 15초 뒤 더미 결과를 만들어
-    `IngameServerInstance.ReportMatchResult` → `SendMatchResultAsync`로 흘려보냄. 이게
-    "클라 접속→매치 시작→인게임 이동→게임 종료→로비 복귀" 전체 배관을 실제로 태우는
-    최소 구현.
-  - .NET: 프로젝트마다 `Debug/` 폴더로 통일 (프로젝트 자체가 분리 배포 단위라 전체
-    솔루션에서 물리적으로 한 폴더에 모을 순 없지만, 이름 규칙을 통일해서 grep 한 번으로
-    전부 찾을 수 있게 함). `DummyTokenProvider`(`LobbyServer.Auth`→`LobbyServer.Debug`),
-    `DummyServerAuthenticator`(`MasterServer.Security`→`MasterServer.Debug`),
-    `DummyChatFilter`(ChatServer는 프로젝트 전체가 네임스페이스 없는 관례라 폴더만 이동)
-    전부 이동 완료. 인터페이스(`ITokenProvider`, `IServerAuthenticator`, `IChatFilter`)는
-    원래 위치에 그대로 둠 - 나중에 진짜 구현체로 교체할 때 인터페이스는 안 건드리고
-    `Debug/` 파일만 교체/삭제하면 되게.
-  - `DummySubServer`(프로젝트 자체)는 대상에서 제외 - 프로젝트 전체가 이미 더미 전용이라
-    내부에 "진짜 코드 사이에 섞인 더미"가 없음.
+### 로그인 / 계정 / 토큰
+- `LoginServer`/`AccountServer` 신설 - 클라 최초 진입 전담, 계정 검증/생성.
+- 토큰 2슬롯(`CurrentToken`/`PreviousToken`) 실제 대조 검증, 로비/인게임 양방향 전부
+  구현(`TokenVerification.IsValid` 공용). 토큰은 무작위값(`"{무작위값}:{playerId}"`).
+- 비밀번호 해싱(`Pbkdf2PasswordHasher`) - 평문 저장 문제 발견 후 수정.
+- **`AccountServerIntermediary` 리팩터** - AccountServer API를 감싼 범용 추상 클래스
+  (`Shared.Common`, 메일 전용 아님, 나중에 아이템/밴/VIP 등으로 확장 가능). 제3자 대상
+  전송(`RemoteMailNotifier`, 세션 레지스트리로 소유 서버 조회)과 직접 대상 전송(로비/
+  게임 에이전트 각자의 `MailDeliverer`)을 분리 - "지금 나랑 붙어있는 클라냐 제3자냐"가
+  기준. 로비/게임 에이전트/하위 서버 전부 이 구조로 통일, 예전 `CreateAccountServerChannel`
+  중복 완전 제거.
 
+### 매칭 / 재접속
+- 매칭 정상 흐름 1~8번 전부 구현. 매칭 서버 책임 범위는 8번(권한 이전)까지, 이후는
+  게임 에이전트가 직접 처리(자체 방-채움 타임아웃 `RoomTimeout`/`PendingKill`).
+- 재접속 정책: `GameType`별로 허용 여부 결정, 재접 가능 방은 유예 타이머(기본 30초)로
+  세션 유지. `MatchToken` 완전 제거(`OwnerServerId` 기반 검증으로 대체).
+- 매칭/로비/인게임 서버 다운 시나리오 전부 처리(`CompensatingTransaction`, `_matchLock`
+  원자화, 클라 리다이렉트).
+- **전입 티켓(Transfer Ticket) 시스템** - 목적지 서버가 클라보다 먼저 소유권을 받아두는
+  구간(로비↔인게임 전환)에서, 훔친 영구 토큰으로 진짜 클라보다 먼저 도착하는 걸 막는
+  일회용 짧은 티켓(`MainServerIntermediary`, 10초 TTL, `Shared.Common`). 진짜 세션
+  토큰은 안 건드림. `LobbyMainServerIntermediary`/`IngameAgentMainServerIntermediary`가
+  각자 발급 측/수신 측 역할을 대칭적으로 수행. 클라(Unity)까지 왕복 완료
+  (`MatchFound.transfer_ticket`/`PlayerRedirect.transfer_ticket`, `ConnectionApproval`
+  페이로드/`EnterLobbyRequest`에 실어 제출). `ARCHITECTURE.md` "서버 이동과 재접속"
+  섹션에 전체 흐름 상세 기록.
+- **세션 소유권 확인 누락 - 전수조사 및 수정** - `LobbyControlService`의
+  `RequestMatch`/`CancelMatch`/`Logout` 세 곳이 "이 로비가 실제 세션 소유자인지" 확인
+  없이 세션을 수정하고 있었음(발견 경위: 전입 티켓 설계 논의 중 우연히 발견).
+  `GetOwnedSessionOrNullAsync` 헬퍼로 통일 - 소유권(`OwnerServerId`) + 토큰 유효성
+  (`TokenVerification.IsValid`) 둘 다 확인. 게임 에이전트 쪽은 유니티가 항상 자기
+  짝 게임 에이전트하고만 1:1 통신하는 구조라 같은 위험이 원천적으로 없음을 확인.
+- **`AuthInterceptor.ValidateToken`이 세션과 실제로 대조 안 하고 있었음** - 위 전수조사
+  중 발견. `_tokenProvider.ValidateToken`은 토큰 문자열의 형식만 확인하지, 세션의
+  `CurrentToken`/`PreviousToken`과 대조하지 않는다 - 그러니 이미 회전으로 무효화됐어야
+  할 옛 토큰도 형식만 맞으면 `AuthInterceptor`를 그냥 통과한다. 진짜 대조는
+  `EnterLobby`/`ConnectionApproval`(소유권을 새로 클레임하는 지점)에서만 하고 있었음.
+  `GetOwnedSessionOrNullAsync`가 이제 이 대조까지 겸해서, 위 세 RPC는 이 구멍이 막힘 -
+  다른 RPC(`GetFriends` 등)는 세션을 안 건드리는 읽기 전용이라 이 문제의 실질적
+  영향권 밖. `GrpcChannelFactory`(신규, `Shared.Common`)로 채널 생성 로직도 같이 정리
+  (`AccountServerIntermediary`에서 분리 - 그 클래스와 무관한 범용 유틸리티였음).
 
-- [완료] 죽은 코드 정리: 마스터 서버의 `RequestIngameAssignment` RPC 전체 제거
-  (`master.proto`의 RPC/메시지, `MasterControlService.RequestIngameAssignment`,
-  `RoutingHandler.cs`, `Routing/IRoutingStrategy.cs`, `Routing/LeastLoadRoutingStrategy.cs`
-  전부 삭제. 딸려있던 `InstanceRegistry.GetFreshByType`/`InstanceInfo.LastHeartbeatUtc`도
-  이거 하나 때문에만 존재했어서 같이 제거) - 매칭 서버가 생기면서 라우팅 방식이
-  `PrepareMatch`(매칭→게임에이전트)로 완전히 대체됐는데 안 지워지고 남아있던 것.
+### 로비 / 세션 생존
+- `StayConnected` 스트림 - 로비에 조용히 앉아있는 클라의 끊김 감지(하트비트 없이 스트림
+  생존 여부로 판단). 매치 확정 중 정상 이동과는 `OwnerServerId`+`Status` 확인으로 구분.
+- `SessionInvalidated` 이벤트 - 세션이 지워지는 모든 지점에서 발행, 채팅 서버가 구독해
+  강제 종료.
+- `EnterLobby` rate limit(`IRateLimiter`, Redis `SET NX PX`).
 
-- [완료] 죽은 코드 정리: `Shared/MainServer.Common/Ingame/` 폴더 삭제
-  (`IngameMainServer.cs`, `IIngameEventHandler.cs`, `MatchResult.cs`) - `GameServerHandler`가
-  실제로 구현되기 전에 미리 스케치해둔 것으로 보이며, 아무 데서도 참조되지 않았음.
-  단, `OnMatchFinishedAsync`가 하려던 일(매치 결과를 Kafka에 발행 + RabbitMQ로 보상 요청 발행)은
-  `GameServerHandler.HandleMatchResultAsync`가 아직 로그만 찍고 비어있는 자리라, 나중에 실제
-  구현할 때 이 삭제된 코드의 로직을 참고할 수 있음.
-- `AdaptiveWaiter.cs`(`Shared.Common/Threading/`)는 유지하기로 결정 - 지금은 아무 송신
-  루프도 안 쓰고 있지만(다들 `Task.WhenAny(timerTask, queueTask)`를 직접 구현), 나중에
-  송신 루프들을 정리할 기회가 생기면 이걸로 통합하는 걸 고려할 것.
+### 채팅
+- 전면 재설계 - Redis 영속 저장(`IChatRoomStore`/`IChatMessageStore`, 인스턴스 로컬
+  문제 해결), 핸드셰이크 토큰 인증(회전 없음), `RequestChat`/`GetMyRooms`/`GetHistory`.
+- `SystemChatDelivery` - 타입 자체로 신뢰를 구분(필드 값 기반 규약은 스푸핑 위험으로
+  기각). 친구 삭제-메시지 전송 race는 클라 측 "차단 목록" 방식으로 방어.
+- Unity 클라 전체 신설(`IChatChannel`/`WebSocketChatChannel`) - 채팅만 지수 백오프
+  자동 재연결(인게임과 다른 정책).
 
-- [완료] Redis Session Registry 기본 구조
-- [완료] 로비 서버 ↔ Redis 세션 등록/업데이트
-- [완료] 게임 에이전트 ↔ Redis 세션 업데이트
-- [완료] NGO ConnectionApproval (playerId 검증, OwnerServerId 기반 - matchToken은 제거됨)
-- [완료] clientId ↔ playerId 매핑
-- [완료] 채팅 서버 구현 (WebSocket + Protobuf, 채널 입장/퇴장/메시지 송수신)
-- [완료] 프로젝트 구조 정리 (GameProject1/DevTools, Unity, Server)
-- [완료] Directory.Build.props 통합 (절대 경로 제거)
-- [완료] RegistryCleanupServer 폐기 (설계 논의 후 Redis로 대체)
-- [완료] ISessionRegistry 확장 (서버 생존 TTL, TryClaimOwnershipAsync, OwnerServerId)
-- [완료] PlayerSession에 OwnerServerId 추가 (세션과 권한 통합)
-- [완료] MatchToken 완전 제거 (서버 proto + Unity 양쪽) - OwnerServerId 검증으로 대체
-- [완료] 매칭 서버 접속 유지 스트림(`MatchConnectionControl`), 세션 레지스트리 동적 배포,
-  게임 에이전트의 실제 방 생성(`RequestOpenRoomAsync`/`PendingWorkTracker`), Unity
-  `GameManager`/`RoomManager` 구조, 접속 끊김 시 되돌리기(`CompensatingTransaction` +
-  `MatchEngine` 단계별 델리게이트) - 전부 이번 세션에서 구현
-  (설계 논의: 상태 패턴/사가(보상 트랜잭션)/이벤트버스/델리게이트 딕셔너리 비교 후
-  "사가 + 가벼운 델리게이트" 조합 채택. `CompensatingTransaction`은 매칭 도메인과
-  무관한 범용 유틸로 분리 - `PendingWorkTracker`처럼 나중에 재사용 사례가 더 생기면
-  공통점을 보고 합칠지 재검토)
+### 친구 / 우편함
+- 친구 시스템(로비/인게임 양쪽 대리 호출 창구, 채팅 서버는 `RequestChat` 검증만 예외적으로 직접 조회).
+- **우편함 시스템** - 업계 표준 "메일함/인박스" 패턴 채택(실제 상태 변경은 영속 기록,
+  알림은 best-effort). `AccountServer`가 담당(채팅 서버 아님 - 개봉이 보상 지급과
+  얽힌 경제적 트랜잭션이라 원자적 처리가 필요해서). `AccountServerIntermediary`/
+  `RemoteMailNotifier`/서버별 `MailDeliverer`로 배선 완료 - 접속 시 자동 제공(안전망) +
+  신호 즉시 제공(best-effort 최적화) + 클라 능동 조회(`GetMailList`), 로비/게임
+  에이전트 대칭 구현. `mail_id` 기반 식별 원칙 확립(위 "구현 필요"의 UI 경고 참고).
+
+### 기타
+- fire-and-forget 함수는 함수 전체를 try-catch로 감싸는 관례 확립 및 전체 점검 완료
+  (`ARCHITECTURE.md` "코딩 관례" 참고).
+- 디버그/더미 코드 위치 컨벤션(`Debug/`, Unity는 `Dummy/`) 통일.
+- `Server/KNOWN_ISSUES.md` 신설 - 발견-원인-예상피해-해결-결과 형식 기록.

@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Grpc.Core;
 using LobbyServer;
 using MainServer.Common.MatchConnection;
@@ -19,6 +19,7 @@ namespace LobbyServer.Services;
 public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
 {
     private readonly ISessionRegistry _sessionRegistry;
+    private readonly LobbyMainServerIntermediary _mainServerIntermediary;
     private readonly ILogger<MatchNotificationDispatcher> _logger;
 
     // playerId → (스트림, CancellationTokenSource)
@@ -27,9 +28,11 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
 
     public MatchNotificationDispatcher(
         ISessionRegistry sessionRegistry,
+        LobbyMainServerIntermediary mainServerIntermediary,
         ILogger<MatchNotificationDispatcher> logger)
     {
         _sessionRegistry = sessionRegistry;
+        _mainServerIntermediary = mainServerIntermediary;
         _logger = logger;
     }
 
@@ -105,7 +108,27 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
                 session.Status = PlayerStatus.Moving;
                 session.NextServer = confirmed.IngameAddress;
                 session.OwnerServerId = confirmed.IngameServerId;
+                session.OwnerServerType = GameServer.Common.ServerType.Ingame;
                 await _sessionRegistry.UpdateAsync(playerId, session);
+            }
+
+            // 일회용 임시 티켓 발급 + 게임 에이전트한테 미리 통지(KNOWN_ISSUES.md 참고) -
+            // 여기선 매치 알림이 플레이어 개별로 오는 구조라 한 명짜리 배치로 부른다.
+            // confirmed.IngameAddress는 클라가 NGO로 접속할 주소(스킴 없는 host:port)라
+            // gRPC 채널 생성에 못 쓴다 - 게임 에이전트 자신의 gRPC 주소(SelfAddress,
+            // 스킴 포함)를 세션 레지스트리에서 별도로 조회해야 한다.
+            var ticket = string.Empty;
+            var ingameGrpcAddress = await _sessionRegistry.GetServerAddressAsync(confirmed.IngameServerId);
+            if (string.IsNullOrEmpty(ingameGrpcAddress))
+            {
+                _logger.LogWarning("게임 에이전트 gRPC 주소를 찾지 못함 - 전입 티켓 통지 생략: {PlayerId} ServerId={ServerId}",
+                    playerId, confirmed.IngameServerId);
+            }
+            else
+            {
+                var tickets = await _mainServerIntermediary.IssueAndNotifyAsync(
+                    new[] { playerId }, ingameGrpcAddress);
+                ticket = tickets[playerId];
             }
 
             await pending.Stream.WriteAsync(new MatchEvent
@@ -116,6 +139,7 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
                     GameServerAddress = confirmed.IngameAddress,
                     IngameServerId = confirmed.IngameServerId,
                     TimestampUnixMs = TimeUtils.CurrentTimestamp(),
+                    TransferTicket = ticket,
                 },
             });
 
