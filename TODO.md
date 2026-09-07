@@ -66,18 +66,33 @@
       띄움. 위 "대참사" 원칙과 동일하게 자동 재시도 없음 - 이미 몰려있는 로그인
       서버한테 클라들이 자동으로 재시도를 쏟아부으면 복구가 더 늦어짐.
   - `ARCHITECTURE.md`의 "서버 이동과 재접속" 섹션에 상세 기록.
-- **Unity 클라/게임 서버 스크립트의 스레드 안전성 - 암묵적 전제에 의존 중** - `GrpcLobbyChannel`/
-  `GrpcIngameServerChannel`/`WebSocketChatChannel`의 이벤트(`OnMatchFound`,
-  `OnMailProvided` 등)를 구독하는 `ClientInstance`/`IngameServerInstance`의 핸들러들이
-  유니티 API(`NetworkManager`, `RoomManager` 등)를 직접 건드리는데, 이게 항상 메인
-  스레드에서 실행된다는 보장이 **명시적 검증이 아니라 "코드 어디에도 `ConfigureAwait(false)`/
-  `Task.Run`이 없다"는 암묵적 사실 하나에 전적으로 의존**하고 있음(전수 검색 결과 현재는
-  없음 확인됨 - 유니티의 `SynchronizationContext`가 `await` 재개 지점을 메인 스레드로
-  돌려주는 표준 동작에 의존). 문제는: (1) `ConfigureAwait(false)`는 일반 .NET 개발/라이브러리
-  코드에서 흔한 관례라 나중에 무심코 추가되면 컴파일 에러 없이 조용히 깨짐, (2)
-  `Grpc.Net.Client`/`YetAnotherHttpHandler` 등 외부 라이브러리 내부 구현에 있을 가능성도
-  배제 못 함(버전업 시 흔들릴 수 있음). 명시적 방어(예: 델리게이트 호출부에 메인 스레드
-  여부 검증)를 추가할지, 아니면 지금처럼 암묵적 전제로 둘지 미정.
+- **Unity 클라/게임 서버 스크립트의 스레드 안전성 - 명시적 방어 도입, 부분 재배선 완료** -
+  업계 조사 결과(유니티 공식 문서) 결정 근거를 찾음: (1) 네트워킹처럼 지연 우려 시 커스텀
+  동기화를 유니티 자신이 권장, (2) `SynchronizationContext` 캡처 자체에 성능 비용 존재,
+  (3) 결정적으로 - **유니티는 실제 출시(비개발) 빌드에서는 멀티스레드 오작동 검사/에러
+  표시를 안 함** - `ConfigureAwait(false)`가 실수로 들어가도 배포 빌드에서 조용히 터질
+  수 있다는 뜻. 그래서 `ConcurrentQueue` 기반 "메인 스레드 디스패처" 패턴(업계에 실제로
+  흔한 패턴, `UnityMainThreadDispatcher` 등 여러 레퍼런스 확인)을 도입하기로 확정.
+  - **설계**: `Action`(로직)이 아니라 **타입 있는 데이터만** 큐에 넣음(백그라운드는
+    "무슨 일이 있었는지"만 알려주고 "뭘 할지"는 절대 안 넘김) - `object` + `is` 타입
+    검사도 지양(캐스팅 비용), 대신 proto `oneof`(`PayloadCase`, 정수 비교)로 구분.
+    `Dispatch`는 "브로드캐스트 후 각자 확인"이 아니라 **한 곳(스위치)에서 정확히 어느
+    함수를 부를지 결정**하고, 실제 처리 로직만 기능 영역별 `partial` 파일로 나눔.
+    클라/서버(`IngameServerInstance`)는 **완전히 분리된 별도 proto 프로젝트**(배포 시
+    바이너리가 나뉘므로, 합치면 서버 내부 이벤트 구조를 클라 빌드에서 추측할 여지를
+    준다고 판단) - `ClientDispatch.Contracts`(`ClientDispatchEvent`) /
+    `IngameServerDispatch.Contracts`(`IngameServerDispatchEvent`). 둘 다 gRPC 서비스
+    없이 순수 메시지만(`GrpcServices="None"`).
+  - **완료된 재배선**: 클라 - `MatchFound`(로비→인게임 전환), 채팅 4종(`ChatMessageDelivery`/
+    `SystemChatDelivery`/`RoomInvited`/`RoomRemoved` - `WebSocketChatChannel`의 옛
+    `OnMessageReceived`/`OnRoomInvited`/`OnRoomRemoved` 이벤트 체인은 완전히 제거,
+    `ChatMessageInfo` DTO는 `GetHistoryAsync` 전용으로만 남김 - 그건 요청-응답이라
+    범위 밖). 서버 - `MailProvided`.
+  - **남은 재배선**: 서버(`GrpcIngameServerChannel`) - `OnOpenRoomReceived`/
+    `OnCloseRoomReceived`/`OnApprovalResponse`/`OnFriendCommandResult`/`OnDrainReceived`.
+    클라 - `RoomInvited`/`RoomRemoved`는 케이스까지는 만들어놨지만 최종 UI 구독자가
+    없어서(`RequestChat` 수락 화면 등 미착수) 처리부는 비워둠(`MainThreadDispatcher.Chat.cs`
+    참고).
 - **로비는 재접속(재개) 개념 없음 - 확정** - 인게임은 `GetAllowReconnect(gameType)`이
   있는 방은 끊겨도 세션/방 상태를 그대로 두고 재접속 시 이어서 진행하지만, 로비는
   `StayConnected`가 끊기면(순간적인 네트워크 블립이라도) 유예 없이 그 즉시 세션을
