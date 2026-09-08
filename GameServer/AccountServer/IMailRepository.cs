@@ -23,6 +23,9 @@ public interface IMailRepository
     /// (호출부가 정확한 사유를 구분해서 응답할 수 있게, 실패 이유는 별도로 조회).
     /// </summary>
     Task<bool> TryClaimAsync(string playerId, string mailId);
+
+    /// <summary>우편 하나를 완전히 삭제한다(밀어내기 전용 - 정상 수령 흐름은 TryClaimAsync만 씀).</summary>
+    Task DeleteAsync(string playerId, string mailId);
 }
 
 /// <summary>우편 하나의 데이터.</summary>
@@ -31,7 +34,7 @@ public sealed class MailRecord
     public string MailId { get; set; } = string.Empty;
     public string PlayerId { get; set; } = string.Empty;
     public string SourceEventId { get; set; } = string.Empty;
-    public string MailType { get; set; } = string.Empty;
+    public GameServer.Common.MailType MailType { get; set; }
     public string DisplayContent { get; set; } = string.Empty;
     public string PayloadJson { get; set; } = string.Empty;
     public long CreatedAtUnixMs { get; set; }

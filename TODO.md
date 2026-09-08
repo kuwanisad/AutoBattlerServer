@@ -8,6 +8,12 @@
 
 ## 구현 필요
 
+- **[메모] `ItemProvision` 우편 자동 수령 시 "인벤토리 못 넣으면 증발 vs 최대한 채워줌"
+  - 정답 미정** - 우편함 상한선 밀어내기(`MailboxEvictor`) 구현 중 나온 열린 질문.
+  지금은 실제 인벤토리 시스템 자체가 없어서 "자동 수령"이 그냥 `Claimed=true` 표시만
+  하는 걸로 끝나는데, 나중에 진짜 인벤토리 시스템이 생기면 그 지점(`MailboxEvictor`가
+  `TryClaimAsync`를 부르는 자리)에서 "인벤토리가 꽉 차서 못 넣으면 그냥 우편을 증발시킬지,
+  아니면 어떻게든 자리를 만들어서 최대한 채워 넣을지"를 결정해야 함.
 - **로그인 서버 = "갈 곳을 잃은 클라"를 위한 안정적 단일 조회 창구 - 설계 확정, 구현 전**
   - **발단**: 인게임→로비 전환 중 `RoomClosed`(전입 티켓 포함)를 클라가 못 받는 경우
     (네트워크 완전 단절 등), 서버 쪽(세션, 전입 티켓 등록)은 이미 정리가 다 끝났는데
@@ -87,11 +93,25 @@
     `SystemChatDelivery`/`RoomInvited`/`RoomRemoved` - `WebSocketChatChannel`의 옛
     `OnMessageReceived`/`OnRoomInvited`/`OnRoomRemoved` 이벤트 체인은 완전히 제거,
     `ChatMessageInfo` DTO는 `GetHistoryAsync` 전용으로만 남김 - 그건 요청-응답이라
-    범위 밖). 서버 - `MailProvided`.
+    범위 밖). 서버 - `MailProvided`, `FriendCommandResult`, `ApprovalResolved`,
+    `RedirectDisconnect`(**예전부터 `IngameServerInstance.cs` 안에 자체 큐로 파묻혀
+    있던 `_workResults`/`ClientWorkResult`를 발견해서 이 디스패처로 완전히 통합함** -
+    `Update()`의 수동 소비 루프 제거).
+  - **클라/서버 클래스명 분리**: `MainThreadDispatcher`라는 이름을 클라/서버 양쪽이
+    똑같이 쓰고 있던 게 그 자체로 위험 요소라고 판단(로그/스택 트레이스만 봐서 구분
+    불가, 코드 읽는 사람 혼동) - `ClientMainThreadDispatcher`(클라)/
+    `IngameServerMainThreadDispatcher`(서버)로 분리.
+  - **소비자 선택 기준 확정**: 게임 로직 판단이 필요한 이벤트(`OnOpenRoomReceived`/
+    `OnCloseRoomReceived`처럼 `RoomManager` 등에 위임되는 것)는 `GameManager`가
+    소비하고, 순수 네트워크 전달/상태 갱신인 이벤트(오늘 재배선한 것들)는
+    `IngameServerInstance`가 직접 소비 - 이미 있던 `IngameServerInstance ↔ GameManager
+    ↔ CompleteWork` 왕복 패턴과 일치시킴.
   - **남은 재배선**: 서버(`GrpcIngameServerChannel`) - `OnOpenRoomReceived`/
-    `OnCloseRoomReceived`/`OnApprovalResponse`/`OnFriendCommandResult`/`OnDrainReceived`.
+    `OnCloseRoomReceived`(둘 다 `GameManager`가 최종 소비자가 될 예정)/`OnDrainReceived`
+    (지금은 `Debug.Log`만 해서 당장 위험은 없음 - `Drain` 업무 자체가 미구현이라
+    실제 로직이 생기면 그때 재배선 필요).
     클라 - `RoomInvited`/`RoomRemoved`는 케이스까지는 만들어놨지만 최종 UI 구독자가
-    없어서(`RequestChat` 수락 화면 등 미착수) 처리부는 비워둠(`MainThreadDispatcher.Chat.cs`
+    없어서(`RequestChat` 수락 화면 등 미착수) 처리부는 비워둠(`ClientMainThreadDispatcher.Chat.cs`
     참고).
 - **로비는 재접속(재개) 개념 없음 - 확정** - 인게임은 `GetAllowReconnect(gameType)`이
   있는 방은 끊겨도 세션/방 상태를 그대로 두고 재접속 시 이어서 진행하지만, 로비는
@@ -115,8 +135,6 @@
   완전히 독립된 프로세스로 뜸. 나중에 게임 에이전트가 유니티 `.exe`를 자식 프로세스로
   직접 스폰/재시작하는 구조로 갈 예정 - 지금의 하트비트 비대칭(인게임은 게임 에이전트
   끊기면 자기 종료, 게임 에이전트는 안 죽고 버팀)이 이 미래 구조의 전제 조건.
-- **우편함 - 상한선 + 밀어내기 정책** - `InMemoryMailRepository`가 무제한으로 쌓임. DB
-  전환 시 같이 구현(예: 최대 100개, 오래된 것부터 삭제).
 - **⚠⚠⚠ 우편함 - 클라이언트(Unity) UI 연동 ⚠⚠⚠** 서버 배선은 전부 완료(로비/게임
   에이전트 양쪽 접속 시 자동 제공 + 신호 즉시 제공 + 클라 능동 조회, `AccountServerIntermediary`
   리팩터까지 완료). **`ClientInstance.cs`의 실제 수신/UI(메일함 화면, 클릭→확인→개봉,
@@ -236,6 +254,19 @@
   `RemoteMailNotifier`/서버별 `MailDeliverer`로 배선 완료 - 접속 시 자동 제공(안전망) +
   신호 즉시 제공(best-effort 최적화) + 클라 능동 조회(`GetMailList`), 로비/게임
   에이전트 대칭 구현. `mail_id` 기반 식별 원칙 확립(위 "구현 필요"의 UI 경고 참고).
+- **우편함 - 상한선 + 밀어내기 정책** - `mail_type`을 자유 문자열에서 `common.proto`의
+  `MailType` enum(`ItemProvision` - 점검/장애/이벤트 보상 등 전부 통합, `GuildInvite` -
+  이득 불분명 예시)으로 전환. `MailboxEvictor`(신규, `AccountServer`) - 우편함이
+  `AccountServerConfig.MailboxCapacity`(테스트 중이라 지금 2, 검증 끝나면 30으로
+  변경 예정)를 넘으면 밀어냄. 밀어내는 순서는 **수령됨 > 만료됨 > 오래된 것** -
+  정렬 하나(`OrderByDescending(Claimed).ThenByDescending(만료여부).ThenBy(생성시각)`)로
+  세 단계 우선순위를 한 번에 표현. 아직 미수령 상태로 밀려나야 하는 우편은 타입에 따라
+  다르게 처리 - `ItemProvision`(보상)은 밀려나기 전에 자동 수령 처리(`TryClaimAsync`),
+  그 외는 그냥 삭제(거부). 발동 시점은 `CreateAsync`가 아니라 클라의 `GetMailList`
+  요청 시점(`AccountControlService`). `IMailRepository.DeleteAsync` 신설.
+  RabbitMQ 테스트 메시지의 `mailType` 필드는 이제 enum의 C# 멤버 이름(PascalCase,
+  예: `"ItemProvision"`)으로 넣어야 함(`JsonStringEnumConverter` 사용) - proto 원본
+  이름(`"ITEM_PROVISION"`)이 아님에 주의.
 
 ### 기타
 - fire-and-forget 함수는 함수 전체를 try-catch로 감싸는 관례 확립 및 전체 점검 완료

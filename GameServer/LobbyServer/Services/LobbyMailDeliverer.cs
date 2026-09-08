@@ -26,7 +26,7 @@ public sealed class LobbyMailDeliverer
 
     /// <summary>지급까지 하고 바로 전달한다(상점 구매 등 - 지금 나랑 붙어있는 클라 확정).</summary>
     public async Task GrantAndDeliverDirectAsync(
-        string playerId, string sourceEventId, string mailType,
+        string playerId, string sourceEventId, GameServer.Common.MailType mailType,
         string displayContent, string payloadJson, long expiresAtUnixMs = 0)
     {
         var grantResponse = await _accountServer.GrantMailAsync(

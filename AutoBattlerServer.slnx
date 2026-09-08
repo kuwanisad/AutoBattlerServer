@@ -12,6 +12,7 @@
   <Project Path="GameServer/Shared/ClientDispatch.Contracts/ClientDispatch.Contracts.csproj" />
   <Project Path="GameServer/Shared/Common.Contracts/Common.Contracts.csproj" />
   <Project Path="GameServer/Shared/IngameServer.Contracts/IngameServer.Contracts.csproj" />
+  <Project Path="GameServer/Shared/IngameServerDispatch.Contracts/IngameServerDispatch.Contracts.csproj" />
   <Project Path="GameServer/Shared/LobbyServer.Contracts/LobbyServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/LoginServer.Contracts/LoginServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/MainServer.Common/MainServer.Common.csproj" />

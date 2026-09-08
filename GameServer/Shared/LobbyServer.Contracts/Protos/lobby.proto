@@ -131,7 +131,7 @@ message MailProvided {
 
 message MailInfo {
   string mail_id = 1;
-  string mail_type = 2;
+  MailType mail_type = 2;
   string display_content = 3;
   int64 created_at_unix_ms = 4;
   int64 expires_at_unix_ms = 5;

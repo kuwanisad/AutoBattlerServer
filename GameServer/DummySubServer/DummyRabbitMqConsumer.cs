@@ -4,20 +4,23 @@ using Microsoft.Extensions.Options;
 using Shared.Common.Account;
 using SubServer.Common.Messaging;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace DummySubServer;
 
 /// <summary>
 /// reward-queue 메시지 본문은 JSON으로 가정한다(더미/예시라 실제 스키마는 상위 시스템이
 /// 뭘 발행하느냐에 따라 달라질 것): { "playerId", "sourceEventId", "mailType",
-/// "displayContent", "payloadJson" }. sourceEventId는 이 메시지 자체의 고유 ID로 채워
-/// 넣어야 한다 - RabbitMQ가 "최소 한 번" 배달이라 같은 메시지가 재전달돼도 GrantMail이
-/// 멱등하게 처리한다.
+/// "displayContent", "payloadJson" }. mailType은 MailType enum의 C# 멤버 이름
+/// 문자열(PascalCase, 예: "ItemProvision" - proto 원본 이름 "ITEM_PROVISION"이
+/// 아님)로 받는다 - JsonStringEnumConverter가 파싱을 처리한다. sourceEventId는 이
+/// 메시지 자체의 고유 ID로 채워 넣어야 한다 - RabbitMQ가 "최소 한 번" 배달이라 같은
+/// 메시지가 재전달돼도 GrantMail이 멱등하게 처리한다.
 /// </summary>
 internal sealed record RewardEvent(
     string PlayerId,
     string SourceEventId,
-    string MailType,
+    GameServer.Common.MailType MailType,
     string DisplayContent,
     string PayloadJson);
 
@@ -48,8 +51,9 @@ public sealed class DummyRabbitMqConsumer : RabbitMqConsumerBase
         RewardEvent? evt;
         try
         {
-            evt = JsonSerializer.Deserialize<RewardEvent>(body,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            options.Converters.Add(new JsonStringEnumConverter());
+            evt = JsonSerializer.Deserialize<RewardEvent>(body, options);
         }
         catch (JsonException ex)
         {

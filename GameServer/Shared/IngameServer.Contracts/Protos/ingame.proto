@@ -249,6 +249,17 @@ message FriendCommandResponse {
   }
 }
 
+// 인게임 서버(Unity)가 NGO 접속 완료 시 클라한테 조건 없이 보내는 메시지 - 예전엔
+// "새 토큰이 있을 때만" 보내는 TokenUpdate였는데, 재접속 가능 여부도 매번 알려줘야
+// 해서 의미를 넓힘(KNOWN_ISSUES.md 참고). 이것도 gRPC로 안 나가고 NGO
+// CustomMessagingManager로만 릴레이되는 메시지 - FriendCommandResponse와 같은 용도.
+message ConnectionWelcome {
+  string new_token = 1;      // 재발급 없었으면 빈 문자열
+  bool allow_reconnect = 2;  // 이 방이 재접속 가능한 타입인지 - 클라가 끊겼을 때
+                              // 로그인 서버를 거치지 않고 바로 이 주소로 재시도할 수
+                              // 있는지 판단하는 데 씀
+}
+
 message GetFriendsResult {
   repeated string friend_player_ids = 1;
 }
@@ -270,7 +281,7 @@ message MailProvided {
 
 message MailInfo {
   string mail_id = 1;
-  string mail_type = 2;
+  MailType mail_type = 2;
   string display_content = 3;
   int64 created_at_unix_ms = 4;
   int64 expires_at_unix_ms = 5;

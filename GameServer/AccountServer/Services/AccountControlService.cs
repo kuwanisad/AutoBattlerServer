@@ -18,6 +18,7 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
     private readonly FriendEventOutbox _outbox;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IMailRepository _mailRepository;
+    private readonly MailboxEvictor _mailboxEvictor;
     private readonly ILogger<AccountControlService> _logger;
 
     public AccountControlService(
@@ -25,12 +26,14 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         FriendEventOutbox outbox,
         IPasswordHasher passwordHasher,
         IMailRepository mailRepository,
+        MailboxEvictor mailboxEvictor,
         ILogger<AccountControlService> logger)
     {
         _repository = repository;
         _outbox = outbox;
         _passwordHasher = passwordHasher;
         _mailRepository = mailRepository;
+        _mailboxEvictor = mailboxEvictor;
         _logger = logger;
     }
 
@@ -188,6 +191,10 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
 
     public override async Task<GetMailListResponse> GetMailList(GetMailListRequest request, ServerCallContext context)
     {
+        // 클라가 우편함을 조회하는 이 시점에 상한선 초과 여부를 확인해서 정리한다
+        // (CreateAsync 시점이 아니라 - MailboxEvictor 주석 참고).
+        await _mailboxEvictor.EvictIfOverCapacityAsync(request.PlayerId);
+
         var mails = await _mailRepository.GetForPlayerAsync(request.PlayerId);
 
         var response = new GetMailListResponse();

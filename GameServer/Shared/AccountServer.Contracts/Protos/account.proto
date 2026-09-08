@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "common.proto";
+
 option csharp_namespace = "AccountServer";
 
 // 로그인 서버 → 계정 서버 계약. 단항 RPC만 있다 - 계정 서버는 매칭 서버처럼 서버 풀을
@@ -85,7 +87,7 @@ message RemoveFriendResponse {
 message GrantMailRequest {
   string player_id = 1;
   string source_event_id = 2;
-  string mail_type = 3;         // 예: "ENHANCE_STONE_GRANT" - 필터/판별용, JSON 밖 일반 컬럼으로 저장
+  MailType mail_type = 3;        // 필터/판별용, JSON 밖 일반 컬럼으로 저장
   string display_content = 4;   // 사람이 읽는 문구
   string payload_json = 5;      // 첨부물 상세 구성(가변적) - JSON 컬럼에 저장
   int64 expires_at_unix_ms = 6; // 0이면 만료 없음
@@ -107,7 +109,7 @@ message GetMailListResponse {
 
 message MailSummary {
   string mail_id = 1;
-  string mail_type = 2;
+  MailType mail_type = 2;
   string display_content = 3;
   int64 created_at_unix_ms = 4;
   int64 expires_at_unix_ms = 5;

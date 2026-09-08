@@ -16,7 +16,7 @@ public abstract class AccountServerIntermediary
     protected abstract string AccountServerAddress { get; }
 
     public async Task<AccountServer.GrantMailResponse> GrantMailAsync(
-        string playerId, string sourceEventId, string mailType,
+        string playerId, string sourceEventId, GameServer.Common.MailType mailType,
         string displayContent, string payloadJson, long expiresAtUnixMs = 0)
     {
         if (string.IsNullOrEmpty(AccountServerAddress))

@@ -32,7 +32,7 @@ public sealed class RemoteMailNotifier
     public async Task GrantAndNotifyRemoteAsync(
         string playerId,
         string sourceEventId,
-        string mailType,
+        GameServer.Common.MailType mailType,
         string displayContent,
         string payloadJson,
         long expiresAtUnixMs = 0)
