@@ -24,4 +24,15 @@
 		</Protobuf>
 	</ItemGroup>
 
+	<!-- 원래는 없었음 - 유니티가 지금까지 마스터 프로토콜을 직접 참조할 일이 없었으나
+	     (항상 로비/게임 에이전트를 거쳐서만 간접적으로 관련됨), ingame.proto/
+	     ingame_server_dispatch.proto가 AnnouncementTask(마스터가 정의한 타입)를 직접
+	     참조하게 되면서 처음으로 필요해짐. -->
+	<Target Name="CopyGeneratedToUnity" AfterTargets="Build">
+		<Copy
+		  SourceFiles="$(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\Master.cs;
+                   $(ProjectDir)obj\$(Configuration)\$(TargetFramework)\Protos\MasterGrpc.cs"
+		  DestinationFolder="$(UnityServerGeneratedPath)" />
+	</Target>
+
 </Project>

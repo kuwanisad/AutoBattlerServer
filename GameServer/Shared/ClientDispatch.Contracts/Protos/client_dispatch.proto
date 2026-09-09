@@ -25,6 +25,7 @@ message ClientDispatchEvent {
     SystemChatDelivery chat_system_message = 3;
     RoomInvited room_invited = 4;
     RoomRemoved room_removed = 5;
+    AnnouncementDelivery announcement = 6;
   }
 }
 

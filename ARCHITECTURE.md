@@ -214,20 +214,41 @@ NGO 기반 인게임 서버다.
 - **확인 응답 대기 중 클라가 다른 이유로 먼저 끊김** — `IngameServerInstance.OnClientDisconnected`가 `RoomManager.GetRoomIdForPlayer`로 "이미 정리된 방(`RoomManager.CloseRoom`이 먼저 실행됨)"인지 확인, 맞으면 `PlayerLeft`를 게임 에이전트한테 아예 안 보냄(정상 종료로 인한 예상된 이탈이라는 걸 유니티가 로컬에서 이미 알고 있으므로 - 프로세스 경계를 안 넘음). 이 판정이 어긋나면(옛 버전) 게임 에이전트가 방금 정상적으로 이관한 세션을 "예기치 못한 이탈"로 오인해 덮어쓰는 버그가 있었음 - `KNOWN_ISSUES.md` 참고.
 - **`RoomClosed` 메시지 자체를 클라가 못 받음(네트워크 완전 단절)** — 서버 쪽(세션, 티켓 등록)은 정리가 다 끝났는데 클라만 갈 곳을 모르는 상태로 남음. 클라가 로그인 서버로 재진입을 시도할 수밖에 없는데, **이 경로가 지금 막혀있음** - 아래 참고.
 
-### 로그인 서버 = 갈 곳을 잃은 클라를 위한 안정적 단일 조회 창구 - 설계 확정, 구현 전
+### 로그인 서버 = 갈 곳을 잃은 클라를 위한 안정적 단일 조회 창구 - 구현 완료
 
-**지금 동작**: `LoginConnectionHandler`가 `TryClaimOwnershipWithPreviousOwnerAsync`로 소유권 클레임을 시도하는데, 이미 살아있는 소유자(위에서 언급한 두 경우처럼 로비/인게임이 이미 세션을 정리해둔 상태)가 있으면 그냥 `SESSION_CONFLICT`로 거부한다. 클라 입장에선 "재접속 시도했는데 이유 모를 거부"만 받는다.
+**설계 참고 사례**: AWS GameLift의 서버리스 매치메이킹 구조 - 클라는 특정 서버 주소를
+직접 캐시/재시도하지 않고, 항상 안정적인 단일 창구(API Gateway)한테 "지금 상태 뭐야"를
+물어본다. 그 창구가 내부적으로 상태 저장소(DynamoDB)를 조회해서 알려주는 구조. 우리
+시스템에서 "안정적 단일 창구" 역할이 **로그인 서버**, "내부 상태 저장소" 역할이
+**세션 레지스트리(Redis)**에 대응한다.
 
-**설계 참고 사례**: AWS GameLift의 서버리스 매치메이킹 구조 - 클라는 특정 서버 주소를 직접 캐시/재시도하지 않고, 항상 안정적인 단일 창구(API Gateway)한테 "지금 상태 뭐야"를 물어본다. 그 창구가 내부적으로 상태 저장소(DynamoDB)를 조회해서 알려주는 구조. 우리 시스템에서 "안정적 단일 창구" 역할이 **로그인 서버**, "내부 상태 저장소" 역할이 **세션 레지스트리(Redis)**에 대응한다.
-
-**확정된 흐름**:
+**흐름**:
 1. 클라 접속이 끊김.
-2. **재접속 가능한 방에서 순간적으로 끊긴 경우만 예외** - 기존에 갖고 있던 인게임 주소로 직접 재시도(빠른 경로, 위 "로비 → 인게임 전환"에 이미 있는 `ConnectionApproval` 토큰 대조 복귀 메커니즘 그대로).
-3. 그 외 모든 경우(로비는 재접속 개념 자체가 없음 / 재접속 불가능한 방 / 2번 시도가 접속 거부로 실패) → 클라가 로그인 서버한테 `playerId` + 세션 토큰(계정 자격증명 재인증 아님)을 제출.
-4. 로그인 서버가 세션 레지스트리 조회 - 살아있는 소유자가 있으면(`OwnerServerId` + 그 서버의 하트비트 TTL) 토큰 대조 후 그 주소로 안내만 함(소유권 자체는 안 건드림). 소유자가 없으면 완전히 새로 시작(기존 로직 그대로).
-5. "목적지 서버가 죽었다"는 판단은 클라가 직접 접속 시도 실패로 알게 되는 것 - 로그인 서버가 능동적으로 감지해서 push하는 게 아니라, 다음 조회 시점에 하트비트 TTL이 자연스럽게 만료된 걸 보고 판단.
+2. **재접속 가능한 방에서 순간적으로 끊긴 경우만 예외** - `RoomPolicy`(클라, 신규)가
+   `ConnectionWelcome`으로 매번 받아둔 `allow_reconnect`를 보고 `ReconnectAction.Reconnect`를
+   반환하면, 로그인 서버를 거치지 않고 기존에 갖고 있던 인게임 주소로 직접 재시도(빠른
+   경로). 딱 한 번만 시도 - 재시도까지 실패하면 다음 끊김부턴 자동으로 3번 경로로
+   폴백(`RoomPolicy`가 시도 이력을 캡슐화해서 무한 재시도를 막음).
+3. 그 외 모든 경우(로비는 재접속 개념 자체가 없음 / 재접속 불가능한 방 / 2번 시도가
+   실패) → 클라가 로그인 서버한테 `playerId` + 세션 토큰(계정 자격증명 재인증 아님)을
+   제출(`ReconnectRequest`).
+4. 로그인 서버가 세션 레지스트리 조회 - 살아있는 소유자가 있으면(`OwnerServerId` +
+   그 서버의 하트비트 TTL) 토큰 대조 후 그 주소로 안내만 함(소유권 자체는 안 건드림).
+   소유자가 없으면 완전히 새로 시작(기존 로직 그대로). `DestinationServerType`으로
+   목적지가 로비인지 인게임인지 클라에 알려줌.
+5. "목적지 서버가 죽었다"는 판단은 클라가 직접 접속 시도 실패로 알게 되는 것 - 로그인
+   서버가 능동적으로 감지해서 push하는 게 아니라, 다음 조회 시점에 하트비트 TTL이
+   자연스럽게 만료된 걸 보고 판단.
 
-**번외 - "대참사" 시나리오(이동 중 도착지 서버가 죽거나 회전 토큰 2개 다 만료)**: 클라가 접속 거부당해 로그인 서버로 가도, 세션 레지스트리가 아직 그 서버를 "살아있다"고 보고 있을 수 있어(하트비트 TTL 만료 전) 새로 로그인해야 하는 상황이 될 수 있다. **이 경우 클라가 자동으로 즉시 재시도하는 게 오히려 안 좋다는 결론** - 서버 죽음은 TTL이 자연 만료될 시간이 필요하고, 토큰 2개 다 만료는 서버가 바쁘다는 신호라 즉시 재접속 폭주가 부하를 더 키운다. **자동 복구 로직 없이 "연결이 끊겼습니다"만 띄우고 사람이 직접 재시도하게 두는 게 나음** - 사람이 누르기까지의 지연이 TTL 만료 시간도 벌어주고 서버 부하도 자연스럽게 완화시킴. 아직 구현 전.
+**번외 - "대참사" 시나리오(이동 중 도착지 서버가 죽거나 회전 토큰 2개 다 만료)**: 클라가
+접속 거부당해 로그인 서버로 가도, 세션 레지스트리가 아직 그 서버를 "살아있다"고 보고
+있을 수 있어(하트비트 TTL 만료 전) 새로 로그인해야 하는 상황이 될 수 있다. **이 경우
+클라가 자동으로 즉시 재시도하는 게 오히려 안 좋다는 결론** - 서버 죽음은 TTL이 자연
+만료될 시간이 필요하고, 토큰 2개 다 만료는 서버가 바쁘다는 신호라 즉시 재접속 폭주가
+부하를 더 키운다. **자동 복구 로직 없이 "연결이 끊겼습니다"만 띄우고 사람이 직접
+재시도하게 두는 게 나음** - 사람이 누르기까지의 지연이 TTL 만료 시간도 벌어주고 서버
+부하도 자연스럽게 완화시킴. **백엔드 로직은 구현+빌드 확인 완료, 클라 UI만 미구현**
+(`TODO.md` 참고).
 
 ---
 
@@ -242,7 +263,7 @@ NGO 기반 인게임 서버다.
 `AccountServer`는 비밀번호를 원문(`AccountRecord.Password`)이 아니라 PBKDF2 해시(`AccountRecord.PasswordHash`)로만 저장한다(`Shared.Common.Auth.Pbkdf2PasswordHasher`, .NET 기본 클래스 라이브러리만 사용, 새 NuGet 패키지 없음). 해시는 되돌릴 수 없는 단방향 변환이라 서버조차 원문을 다시 알아낼 방법이 없다 - DB가 통째로 털려도 공격자가 얻는 건 해시값뿐이다. 검증도 원문 대조가 아니라 상수 시간 비교(`CryptographicOperations.FixedTimeEquals`)로 한다.
 
 ### ConnectionApproval
-클라이언트가 게임 서버(NGO)에 접속할 때 `"{playerId}|{token}"` 페이로드를 포함한다. 게임 에이전트가 Redis에서 세션을 조회해 `Moving` 상태, `OwnerServerId` 소유권 이전 여부(`TryClaimOwnershipAsync`), 토큰 유효성(`TokenVerification.IsValid`)을 모두 검증한다. 승인 시 새 토큰을 발급/회전하고 `CustomMessagingManager`의 `"TokenUpdate"` 메시지로 클라에 전달한다. 검증 실패 시 접속을 거부한다. → 자세한 경위는 [`KNOWN_ISSUES.md` #3](./KNOWN_ISSUES.md#3-connection-approval로비인게임에-토큰-검증이-아예-없었음) 참고.
+클라이언트가 게임 서버(NGO)에 접속할 때 `"{playerId}|{token}|{ticket}"` 페이로드를 포함한다. **1차로 유니티 서버(`IngameServerInstance`) 자신이 `RoomManager` 명단(`GetRoomIdForPlayer`)에 그 playerId가 있는지부터 확인한다** - 로비/매칭 서버가 `OpenRoom`으로 사전 등록해둔 명단에 없으면, 게임 에이전트한테 물어볼 것도 없이 즉시 거부한다(클라가 페이로드에 뭐라고 주장하든 검증 없이 믿지 않기 위함 - 진짜 신원 검증은 아래 2차가 함). 2차로 게임 에이전트가 Redis에서 세션을 조회해 `Moving` 상태, `OwnerServerId` 소유권 이전 여부(`TryClaimOwnershipAsync`), 토큰 유효성(`TokenVerification.IsValid`), 전입 티켓을 모두 검증한다. 승인 시 새 토큰을 발급/회전하고 `ConnectionWelcome` 메시지(새 토큰 + 재접속 가능 여부, NGO 접속 완료 시 조건 없이 매번 전송)로 클라에 전달한다. 검증 실패 시 접속을 거부한다. → 자세한 경위는 [`KNOWN_ISSUES.md` #3](./KNOWN_ISSUES.md#3-connection-approval로비인게임에-토큰-검증이-아예-없었음) 참고.
 
 ### Moving 상태
 서버 이동 중인 플레이어는 Redis에 `Moving` 상태로 기록된다. 해커가 타인인 척 다른 서버에 접속하려 해도 Redis의 `OwnerServerId` 원자적 검증으로 차단된다 (예전엔 `NextServer` + 일회용 `MatchToken` 조합이었으나, 매칭 서버가 게임 에이전트에 플레이어 명단을 직접 전달하는 구조로 바뀌면서 토큰이 불필요해졌다).
@@ -317,8 +338,40 @@ NGO 기반 인게임 서버다.
 ### mail_id 기반 식별 - 클라 UI 안정성의 핵심
 목록이 백그라운드에서 갱신돼도(새 메일 도착 등) 기존에 뜬 확인창/버튼이 가리키는 메일이 안 바뀌어야 한다 - "몇 번째 항목" 같은 위치 기반이 아니라 `mail_id`(안정적 식별자)로 항상 참조한다. 클릭 핸들러도 객체 참조가 아니라 `mail_id` 문자열만 캡처해야 한다. 클라 내부 자료구조는 `Dictionary<mailId, MailInfo>`가 진짜 데이터이고, UI에 보이는 "날짜순 정렬된 목록"은 그 딕셔너리에서 매번 파생시키는 뷰로 다뤄야 한다(별도로 유지관리하는 정렬 리스트를 따로 안 둠). 서버 측 재검증(`OpenMail`)과 합쳐지면, 어떤 타이밍에 뭐가 어긋나도 클라한테 애매한 에러 없이 명확한 사유(`ALREADY_CLAIMED`/`EXPIRED`/`NOT_FOUND`)로 처리된다.
 
+### 우편함 상한선 + 밀어내기 정책
+`mail_type`은 자유 문자열이 아니라 `common.proto`의 `MailType` enum이다 - `ItemProvision`(보상, 점검/장애/이벤트 등 세부 사유는 전부 통합)과 `GuildInvite`(수락이 실제 결정이라 이득이 불분명한 예시) 두 갈래로, 어떤 타입이 "받아서 손해 없는 것"인지 판단하는 기준이 된다. `MailboxEvictor`(`AccountServer`)가 우편함이 `AccountServerConfig.MailboxCapacity`를 넘으면 밀어낸다 - 순서는 **수령됨 > 만료됨 > 오래된 것**(정렬 하나로 세 우선순위를 한 번에 표현: `OrderByDescending(Claimed).ThenByDescending(만료여부).ThenBy(생성시각)`). 아직 미수령 상태로 밀려나야 하는 우편은 `ItemProvision`이면 밀려나기 전에 자동 수령 처리(`TryClaimAsync`) 후 삭제, 그 외 타입은 그냥 삭제(거부)한다. 발동 시점은 우편 생성 시점이 아니라 클라의 `GetMailList` 요청 시점 - "만들 때마다 확인"이 아니라 "조회할 때 정리"로, 확인 빈도를 자연스럽게 줄인다.
+
 ### ⚠⚠⚠ 클라이언트(Unity) UI 연동은 서버 배선과 별개로 신중히 다룰 것
 서버 측(로비/게임 에이전트/`AccountServer`/`DummySubServer`, Unity의 `IngameServerInstance`까지)은 전부 완료됐다. **`ClientInstance.cs`(실제 클라이언트)의 수신 처리와 UI(메일함 화면, 클릭→확인→개봉 흐름, 알림음/배지)는 의도적으로 손 안 댔다** - 이건 단순 배선이 아니라 실제 게임 UI와 밀접하게 엮인 작업이라, 위 `mail_id` 기반 식별 원칙을 UI 코드가 정확히 안 지키면 "확인창 떠있는 동안 배경이 갱신되는" 류의 race가 실제로 터질 수 있다. UI 설계와 반드시 같이 논의해서 진행할 것.
+
+## Unity 클라/서버 스레드 안전성 - MainThreadDispatcher
+
+### 왜 필요한가
+유니티는 공식적으로 `await` 재개를 메인 스레드로 되돌려주지만(`SynchronizationContext`), 여기 의존하는 것만으로는 부족하다는 근거를 찾았다: (1) 유니티 자신도 네트워킹처럼 지연이 우려되는 경우 커스텀 동기화를 권장하고, (2) `SynchronizationContext` 캡처 자체에 성능 비용이 있으며, (3) 결정적으로 - **유니티는 성능상의 이유로 실제 출시(비개발) 빌드에서는 멀티스레드 오작동 검사/에러 표시를 하지 않는다**. `ConfigureAwait(false)`가 실수로 들어가도 배포 빌드에서 조용히 터질 수 있다는 뜻이다.
+
+### 설계
+백그라운드 스레드(gRPC 수신 루프 등)는 `Action`(로직)이 아니라 **타입 있는 데이터만** 큐에 넣는다 - "무슨 일이 있었는지"만 알려주고 "뭘 할지"는 절대 안 넘긴다. `object` + `is` 타입 검사도 안 쓴다(캐스팅 비용) - 대신 proto `oneof`(`PayloadCase`, 정수 비교)로 타입을 구분한다. `Dispatch`는 "브로드캐스트 후 각자 확인"이 아니라 **한 곳(스위치)에서 정확히 어느 함수를 부를지 결정**하고, 실제 처리 로직만 기능 영역별 `partial` 파일로 나눈다. 큐 자체는 `ConcurrentQueue`, 정적 클래스 + `[RuntimeInitializeOnLoadMethod]`로 씬에 아무것도 안 놓고 재생 시점에 스스로 드라이버(`MonoBehaviour`)를 생성한다.
+
+클라/서버(`IngameServerInstance`)는 **완전히 분리된 별도 proto 프로젝트 + 클래스명**이다 - 배포 시 바이너리가 나뉘므로, 합치면 서버 내부 이벤트 구조를 클라 빌드에서 추측할 여지를 준다고 판단했다. `ClientDispatch.Contracts`(`ClientDispatchEvent`, `ClientMainThreadDispatcher`) / `IngameServerDispatch.Contracts`(`IngameServerDispatchEvent`, `IngameServerMainThreadDispatcher`). 둘 다 gRPC 서비스 없이 순수 메시지만(`GrpcServices="None"`).
+
+### 소비자 선택 기준
+게임 로직 판단이 필요한 이벤트(`OpenRoom`처럼 `RoomManager` 등에 위임되는 것)는 `GameManager`가 소비하고, 순수 네트워크 전달/상태 갱신인 이벤트(`CloseRoom`, 친구 관리, 공지 등 - `CloseRoom`은 겉보기와 다르게 "판단"이 아니라 NGO 클라 정리의 전제 조건으로 `RoomManager.CloseRoom`을 부르는 것뿐)는 `IngameServerInstance`가 직접 소비한다 - 이미 있던 `IngameServerInstance ↔ GameManager ↔ CompleteWork` 왕복 패턴과 일치시켰다.
+
+예전부터 `IngameServerInstance.cs` 안에 `_workResults`(`ConcurrentQueue<ClientWorkResult>`)라는 자체 큐가 파묻혀 있었는데, 이 디스패처와 정확히 같은 목적으로 예전부터 독립적으로 존재했던 걸 발견해서 완전히 통합했다(`Update()`의 수동 소비 루프 제거).
+
+## 공지 시스템
+
+관리자가 "N분 뒤 서버가 종료됩니다" 같은 공지를 전체 클라(또는 특정 서버 타입/인스턴스)한테 방송한다. 업계 사례(AccelByte의 notification manager, Velocity 프록시의 status-service) 조사 결과 "중앙 창구 하나가 공지의 유일한 소스가 되고, 그게 연결된 모든 서버한테 브로드캐스트한다"는 패턴이 공통적이었다 - 우리 시스템에서 그 중앙 창구가 **마스터 서버**(이미 `MasterServerInstruction`으로 이 역할을 하고 있었으므로).
+
+**패킷 절감**: 자유 문구 대신 `AnnouncementType`(enum) 값 하나로 퉁긴다 - 클라가 그 값을 받아서 자기 언어/문구로 알아서 해석한다. 전체 브로드캐스트 경로에서 패킷 양이 상당할 수 있어서, `/admin/announce`부터 최종 클라 수신까지 문자열이 오가는 지점이 하나도 없다.
+
+**흐름**: `/admin/announce`(관리자) → `MasterServerInstruction.Announcement`(`AnnouncementTask{ announcement_type, active }` - 지속 업무라 `active`로 시작/중지 구분) → 로비/게임 에이전트(둘 다 `MasterConnectionService.OnAnnouncementRequested` 구독) → 각 서버가 자기 클라들한테 릴레이.
+
+**로비(진짜 멀티스레드, ASP.NET Core)**: `GlobalWorker`(신규, `BackgroundService` - `AddSingleton`+`AddHostedService`로 단일 인스턴스+서버 시작 즉시 실행 보장)가 `Works`/`PendingWorks`(순서대로 처리) + `_standingWorkItems`(지금 활성화된 지속 업무 - 새로 접속하는 클라한테 한 번에 다 주기 위한 소스)를 둔다. **경합 방지**: "클라 접속 등록"과 "공지 활성화 시 전체 스냅샷"이 겹치면 그 찰나에 접속한 클라가 공지를 영영 못 받을 수 있어서, `LobbyConnectionRegistry.SyncRoot`(노출된 락 - 접속자 명단과 관련된 상태를 조작하려면 반드시 이 락을 잡아야 함) 안에서 등록+활성화가 항상 순서대로 원자적으로 일어나게 한다(중첩 순서: SyncRoot → GlobalWorker 내부 락, 항상 이 순서 고정 - 데드락 방지).
+
+**게임 에이전트(1:1 연결, `GameServerHandler`가 `AddSingleton`)**: "모든 게임 서버 인스턴스한테 뿌린다"는 개념 자체가 필요 없다 - 그냥 이 하나의 연결(`OutboundQueue`)한테 마스터 지시를 그대로 릴레이만 하면 된다.
+
+**인게임 서버(유니티, 단일 스레드)**: 로비와 다르게 **락이 전혀 필요 없다** - `OnClientConnectedCallback`도, 디스패처가 큐를 비우는 것도 전부 메인 스레드 하나에서만 실행되므로, 처리 함수 안에 `await` 없이 동기적으로 "등록+스냅샷 방송"을 끝내기만 하면 그 사이에 다른 코드가 절대 끼어들 수 없다. `OnClientReady`(신규, `IngameServerInstance` - NGO 접속이 실제로 완료된(`ConnectionWelcome`까지 전달된) 클라를 알려줌, `ReadyClientInfo`로 감싸서 나중에 필드가 늘어나도 델리게이트 시그니처가 안 바뀌게 함)에 공지 전달 함수를 등록해서 새 접속자한테 계속 전달하고, 지금 접속 중인 전원한테는 `CustomMessagingManager.SendNamedMessage`의 **다중 클라 오버로드**(`IReadOnlyList<ulong>` 받는 것)로 반복문 없이 한 번에 방송한다.
 
 ## 코딩 관례
 

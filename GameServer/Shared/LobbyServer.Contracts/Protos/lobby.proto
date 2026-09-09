@@ -95,7 +95,12 @@ message StayConnectedRequest {}
 message StayConnectedEvent {
   oneof payload {
     MailProvided mail_provided = 1;
+    AnnouncementDelivery announcement = 2;
   }
+}
+
+message AnnouncementDelivery {
+  AnnouncementType announcement_type = 1;
 }
 
 message NotifyMailUpdatedRequest {

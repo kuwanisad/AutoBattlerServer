@@ -71,4 +71,39 @@ app.MapPost("/admin/shutdown", (
     return Results.Ok($"접속 중인 전체 {registry.GetAll().Count}개 인스턴스에 종료 지시 전달");
 });
 
+app.MapPost("/admin/announce", (
+    InstanceRegistry registry,
+    string? instanceId,
+    ServerType? serverType,
+    AnnouncementType announcementType,
+    bool active) =>
+{
+    var masterMessage = new MasterMessage
+    {
+        Instruction = new MasterServerInstruction
+        {
+            Announcement = new AnnouncementTask { AnnouncementType = announcementType, Active = active },
+        },
+    };
+
+    if (!string.IsNullOrEmpty(instanceId))
+    {
+        registry.Enqueue(instanceId, masterMessage);
+        return Results.Ok($"인스턴스 {instanceId}에 공지 지시 전달 (Type={announcementType}, Active={active})");
+    }
+
+    if (serverType.HasValue)
+    {
+        var targets = registry.GetByType(serverType.Value).ToList();
+        foreach (var instance in targets)
+        {
+            registry.Enqueue(instance.InstanceId, masterMessage);
+        }
+        return Results.Ok($"{serverType} 타입 {targets.Count}개 인스턴스에 공지 지시 전달 (Type={announcementType}, Active={active})");
+    }
+
+    registry.Broadcast(masterMessage);
+    return Results.Ok($"접속 중인 전체 {registry.GetAll().Count}개 인스턴스에 공지 지시 전달 (Type={announcementType}, Active={active})");
+});
+
 app.Run();

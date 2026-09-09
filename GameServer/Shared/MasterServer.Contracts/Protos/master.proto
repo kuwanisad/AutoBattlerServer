@@ -4,8 +4,6 @@ import "common.proto";
 
 option csharp_namespace = "MasterServer";
 
-package masterserver;
-
 service MasterControl {
   rpc Connect(stream MainServerMessage) returns (stream MasterMessage);
 }
@@ -83,6 +81,7 @@ message ChatServerInfo {
 message MasterServerInstruction {
   oneof task {
     ShutdownTask shutdown = 1;
+    AnnouncementTask announcement = 2;
     // 확장 지점 - 나중에 다른 업무 종류가 생기면 여기 계속 추가.
   }
 }
@@ -90,4 +89,13 @@ message MasterServerInstruction {
 message ShutdownTask {
   int64 grace_period_ms = 1;  // 이 시간 안에 정리하고 종료해달라는 유예
   string reason = 2;          // 로그/모니터링용(예: "패치 배포")
+}
+
+// 공지 방송 - 지속적인 업무라 active로 시작/중지를 구분한다. active=true를 받으면
+// (1) 그 순간 접속 중인 클라 전원한테 즉시 스냅샷 방송하고 (2) 앞으로 새로 접속하는
+// 클라한테도 계속 전달하도록 델리게이트에 등록한다. active=false를 받으면 그 등록만
+// 해제한다(이미 받은 클라한테 "취소" 통지는 안 함 - 공지는 한 번 보면 그걸로 끝).
+message AnnouncementTask {
+  AnnouncementType announcement_type = 1;
+  bool active = 2;
 }

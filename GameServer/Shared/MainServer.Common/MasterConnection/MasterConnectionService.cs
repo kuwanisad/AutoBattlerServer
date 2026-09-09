@@ -314,12 +314,27 @@ public sealed class MasterConnectionService : BackgroundService
     /// </summary>
     public event Action<ShutdownTask>? OnShutdownRequested;
 
+    /// <summary>
+    /// 공지 방송 지시 - active=true면 (1) 지금 접속 중인 클라 전원한테 즉시 방송하고
+    /// (2) 앞으로 새로 접속하는 클라한테도 계속 전달하도록 등록, active=false면 그
+    /// 등록만 해제한다. 실제 등록/해제(예: OnClientConnected 델리게이트) 및 스냅샷
+    /// 방송은 서버별로 성격이 달라서(로비는 gRPC 스트림, 인게임은 NGO, 채팅은 웹소켓)
+    /// 각 서버가 직접 구독해서 처리해야 한다 - 여기선 그냥 신호만 중계한다.
+    /// </summary>
+    public event Action<AnnouncementTask>? OnAnnouncementRequested;
+
     private void HandleInstruction(MasterServerInstruction instruction, CancellationToken stoppingToken)
     {
         switch (instruction.TaskCase)
         {
             case MasterServerInstruction.TaskOneofCase.Shutdown:
                 HandleShutdown(instruction.Shutdown, stoppingToken);
+                break;
+
+            case MasterServerInstruction.TaskOneofCase.Announcement:
+                _logger.LogInformation("마스터로부터 공지 지시 수신: Active={Active} Type={Type}",
+                    instruction.Announcement.Active, instruction.Announcement.AnnouncementType);
+                OnAnnouncementRequested?.Invoke(instruction.Announcement);
                 break;
 
             default:

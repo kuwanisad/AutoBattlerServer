@@ -18,7 +18,6 @@
   <Project Path="GameServer/Shared/MainServer.Common/MainServer.Common.csproj" />
   <Project Path="GameServer/Shared/MasterServer.Contracts/MasterServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/MatchingServer.Contracts/MatchingServer.Contracts.csproj" />
-  <Project Path="GameServer/Shared/ServerDispatch.Contracts/ServerDispatch.Contracts.csproj" />
   <Project Path="GameServer/Shared/Shared.Common/Shared.Common.csproj" />
   <Project Path="GameServer/Shared/SubServer.Common/SubServer.Common.csproj" />
 </Solution>

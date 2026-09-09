@@ -17,11 +17,12 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\Common.Contracts\Common.Contracts.csproj" />
+		<ProjectReference Include="..\MasterServer.Contracts\MasterServer.Contracts.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<Protobuf Include="Protos\ingame.proto" GrpcServices="Both">
-			<AdditionalImportDirs>..\Common.Contracts\Protos</AdditionalImportDirs>
+			<AdditionalImportDirs>..\Common.Contracts\Protos;..\MasterServer.Contracts\Protos</AdditionalImportDirs>
 		</Protobuf>
 	</ItemGroup>
 

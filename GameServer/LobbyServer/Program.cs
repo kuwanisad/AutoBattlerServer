@@ -37,6 +37,14 @@ builder.Services.AddSingleton<IMatchNotificationHandler>(sp => sp.GetRequiredSer
 builder.Services.AddSingleton<MatchServerConnection>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchServerConnection>());
 
+// 공지 등 클라 전원 대상 작업 - 반드시 단일 인스턴스, 서버 시작 즉시 실행돼야 함
+// (인스턴스가 여럿이면 각자 다른 Works/PendingWorks를 가져서 "하나의 순서로 직렬화"라는
+// 목적이 깨지고, 지연 생성이면 시작 직후 온 지시가 유실될 수 있음 - GlobalWorker
+// 클래스 주석 참고).
+builder.Services.AddSingleton<GlobalWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<GlobalWorker>());
+builder.Services.AddSingleton<LobbyAnnouncementHandler>();
+
 // Redis
 builder.Services.AddSessionRegistry();
 builder.Services.AddHostedService<ServerHeartbeatService>();
@@ -55,6 +63,12 @@ var app = builder.Build();
 
 // 로비 서버는 시작하자마자 개방 - 인게임 서버와 달리 별도 준비 단계가 없다.
 var masterConnection = app.Services.GetRequiredService<MasterConnectionService>();
+
+// LobbyAnnouncementHandler는 백그라운드 루프가 없는 순수 싱글톤이라, 아무도 안 쓰면
+// 지연 생성되어 생성자의 OnAnnouncementRequested 구독 자체가 안 걸린다 - 여기서
+// 강제로 인스턴스화해서 시작 즉시 구독이 걸리도록 보장한다.
+app.Services.GetRequiredService<LobbyAnnouncementHandler>();
+
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     masterConnection.UpdateStatus(currentLoad: 0, capacity: 100); // TODO: 실제 수용량으로 교체

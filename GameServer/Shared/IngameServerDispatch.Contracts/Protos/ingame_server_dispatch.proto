@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 import "ingame.proto";
+import "master.proto";
 
 option csharp_namespace = "IngameServerDispatch";
 
@@ -38,6 +39,9 @@ message IngameServerDispatchEvent {
     // 처리 전부라 위험은 없지만(Debug.Log는 스레드 안전), Drain 업무 자체가 아직
     // 미구현이라 실제 로직이 생기면 이 배선이 필요해질 것이므로 미리 갖춰둔다.
     ClientDrainSignal drain_signal = 7;
+
+    // 마스터의 공지 지시 릴레이 - MasterServer.AnnouncementTask 그대로 재사용(active 포함).
+    AnnouncementTask announcement = 8;
   }
 }
 

@@ -46,3 +46,11 @@ enum MailType {
   ITEM_PROVISION = 1;        // 보상 통합(점검/장애/이벤트 보상 등 세부 사유는 display_content로 구분)
   GUILD_INVITE = 2;          // 예시 - 수락이 실제 결정이라 이득이 불분명함
 }
+
+// 서버 공지 - 자유 문구 대신 열거형 값 하나로 퉁친다. 마스터→각 메인 서버→전체 클라
+// 브로드캐스트 경로 전체(패킷 양이 상당함)에서 문자열 대신 정수 하나만 오가게 하기
+// 위함 - 클라가 이 값을 받아서 자기 언어/문구로 알아서 해석해서 표시한다.
+enum AnnouncementType {
+  ANNOUNCEMENT_TYPE_UNSPECIFIED = 0;
+  SERVER_SHUTDOWN_SOON = 1; // 예시 - "N분 뒤 서버가 종료됩니다"
+}

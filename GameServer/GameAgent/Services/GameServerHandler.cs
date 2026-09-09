@@ -100,6 +100,24 @@ public sealed class GameServerHandler
         _accountServer = accountServer;
         _mainServerIntermediary = mainServerIntermediary;
         _logger = logger;
+
+        // 게임 에이전트는 유니티 서버 하나당 프로세스 하나(1:1, GameServerHandler가
+        // AddSingleton) - "모든 게임 서버 인스턴스한테 뿌린다"는 개념 자체가 필요 없고,
+        // 마스터의 공지 지시를 그대로 이 하나의 연결(_serverInfo)한테 릴레이하면 된다.
+        _masterConnection.OnAnnouncementRequested += RelayAnnouncement;
+    }
+
+    private void RelayAnnouncement(MasterServer.AnnouncementTask task)
+    {
+        if (_serverInfo == null || !_serverInfo.IsReady)
+        {
+            _logger.LogWarning("게임 서버가 준비되지 않아 공지 릴레이 생략: Type={Type} Active={Active}",
+                task.AnnouncementType, task.Active);
+            return;
+        }
+
+        _serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage { Announcement = task });
+        _logger.LogInformation("공지 릴레이: Type={Type} Active={Active}", task.AnnouncementType, task.Active);
     }
 
     /// <summary>

@@ -29,6 +29,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 
     private readonly ITokenProvider _tokenProvider;
     private readonly LobbyConnectionRegistry _connectionRegistry;
+    private readonly GlobalWorker _globalWorker;
     private readonly LobbyAccountServerIntermediary _accountServer;
     private readonly LobbyMailDeliverer _mailDeliverer;
     private readonly LobbyMainServerIntermediary _mainServerIntermediary;
@@ -42,6 +43,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     public LobbyControlService(
         ITokenProvider tokenProvider,
         LobbyConnectionRegistry connectionRegistry,
+        GlobalWorker globalWorker,
         LobbyAccountServerIntermediary accountServer,
         LobbyMailDeliverer mailDeliverer,
         LobbyMainServerIntermediary mainServerIntermediary,
@@ -54,6 +56,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     {
         _tokenProvider = tokenProvider;
         _connectionRegistry = connectionRegistry;
+        _globalWorker = globalWorker;
         _accountServer = accountServer;
         _mailDeliverer = mailDeliverer;
         _mainServerIntermediary = mainServerIntermediary;
@@ -214,7 +217,15 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         if (string.IsNullOrEmpty(playerId)) return;
 
         var channel = System.Threading.Channels.Channel.CreateUnbounded<StayConnectedEvent>();
-        _connectionRegistry.Register(playerId, channel);
+
+        // 접속 등록과 "지금 활성화된 지속 업무(공지 등) 받기"를 한 락 안에서 원자적으로
+        // 처리한다 - 안 그러면 공지 활성화 시점의 전체 스냅샷과 겹쳐서, 그 찰나에
+        // 접속한 클라가 공지를 영영 못 받는 경합이 생긴다(GlobalWorker 주석 참고).
+        lock (_connectionRegistry.SyncRoot)
+        {
+            _connectionRegistry.Register(playerId, channel);
+            _globalWorker.AddWork(playerId);
+        }
 
         try
         {

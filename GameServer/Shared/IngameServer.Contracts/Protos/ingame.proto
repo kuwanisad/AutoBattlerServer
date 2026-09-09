@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 import "common.proto";
+import "master.proto";
 
 option csharp_namespace = "IngameServer";
 
@@ -181,6 +182,8 @@ message GameAgentMessage {
     CloseRoom close_room = 5;          // 방 취소/제거 요청
     FriendCommandResponse friend_command_result = 6;  // 친구 관리 명령어 결과
     MailProvided mail_provided = 7;    // 우편함 갱신 - 게임 서버(Unity)가 특정 클라한테 전달
+    AnnouncementTask announcement = 8; // 마스터의 공지 지시 릴레이 - MasterServer.AnnouncementTask
+                                        // 그대로 재사용(active 포함, 게임 에이전트가 그대로 전달만 함)
   }
 }
 
@@ -277,6 +280,12 @@ message RemoveFriendResult {
 message MailProvided {
   string player_id = 1;  // 어느 클라인지 - 게임 서버(Unity)가 clientId로 매핑하는 데 씀
   repeated MailInfo mails = 2;
+}
+
+// 인게임 서버(Unity)가 NGO CustomMessagingManager로 클라한테 직접 보내는 공지 페이로드 -
+// 로비의 AnnouncementDelivery(lobby.proto)와 대응하는 인게임 버전.
+message AnnouncementDelivery {
+  AnnouncementType announcement_type = 1;
 }
 
 message MailInfo {

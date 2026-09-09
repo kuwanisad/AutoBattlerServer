@@ -16,11 +16,12 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\IngameServer.Contracts\IngameServer.Contracts.csproj" />
+		<ProjectReference Include="..\MasterServer.Contracts\MasterServer.Contracts.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<Protobuf Include="Protos\ingame_server_dispatch.proto" GrpcServices="None">
-			<AdditionalImportDirs>..\IngameServer.Contracts\Protos;..\Common.Contracts\Protos</AdditionalImportDirs>
+			<AdditionalImportDirs>..\IngameServer.Contracts\Protos;..\Common.Contracts\Protos;..\MasterServer.Contracts\Protos</AdditionalImportDirs>
 		</Protobuf>
 	</ItemGroup>
 
