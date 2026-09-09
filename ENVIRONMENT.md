@@ -128,15 +128,15 @@ Copy-Item "$nativeSrc\*" $unityNative
 ```xml
 <!-- Server/Directory.Build.props -->
 <UnityProjectPath>$(MSBuildThisFileDirectory)..\Unity</UnityProjectPath>
-<UnityServerGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Server\Generated</UnityServerGeneratedPath>
-<UnityClientGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Client\Generated</UnityClientGeneratedPath>
+<UnityServerGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Network\Server\Generated</UnityServerGeneratedPath>
+<UnityClientGeneratedPath>$(UnityProjectPath)\Assets\Scripts\Network\Client\Generated</UnityClientGeneratedPath>
 ```
 
 | 프로젝트 | 생성 파일 | 복사 대상 |
 |----------|-----------|-----------|
-| IngameServer.Contracts | Ingame.cs, IngameGrpc.cs | Assets\Scripts\Server\Generated\ |
-| LobbyServer.Contracts | Lobby.cs, LobbyGrpc.cs | Assets\Scripts\Client\Generated\ |
-| ChatServer.Contracts | Chat.cs, ChatGrpc.cs | Assets\Scripts\Client\Generated\ |
+| IngameServer.Contracts | Ingame.cs, IngameGrpc.cs | Assets\Scripts\Network\Server\Generated\ |
+| LobbyServer.Contracts | Lobby.cs, LobbyGrpc.cs | Assets\Scripts\Network\Client\Generated\ |
+| ChatServer.Contracts | Chat.cs, ChatGrpc.cs | Assets\Scripts\Network\Client\Generated\ |
 
 ---
 
