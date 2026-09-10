@@ -51,6 +51,16 @@ public sealed class GlobalWorker : BackgroundService
             {
                 await _signal.WaitAsync(stoppingToken);
 
+                // 먼저 최신 배치를 꺼내 온 뒤, 그 배치를 "이번 반복에서" 바로 배달한다.
+                // (이전 순서: 배달 → 꺼내기였는데, 이러면 방금 꺼낸 배치는 다음 신호가
+                // 올 때까지 안 배달됨 - 새 신호가 다시 안 오면 영영 배달 안 되는 버그였다.
+                // 공지처럼 "한 번 보내고 끝"인 지속 업무가 딱 이 케이스에 걸려서,
+                // 그 뒤로 아무도 새로 로비에 안 들어오면 공지가 영영 안 나갔다.)
+                if (_pendingWorks.TryDequeue(out var next))
+                {
+                    _works = next;
+                }
+
                 if (!_works.IsEmpty)
                 {
                     foreach (var (clientId, items) in _works)
@@ -68,11 +78,6 @@ public sealed class GlobalWorker : BackgroundService
                             }
                         }
                     }
-                }
-
-                if (_pendingWorks.TryDequeue(out var next))
-                {
-                    _works = next;
                 }
             }
         }

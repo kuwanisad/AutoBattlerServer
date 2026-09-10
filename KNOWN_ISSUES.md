@@ -229,3 +229,44 @@
   재호출되는 실수가 나더라도 콜백이 자기 채널을 정확히 참조하게 이중 방어.
 - **결과**: 해결됨. `MainServer.Common.Messaging/RabbitMqConsumer.cs`,
   `MainServerMessagingExtensions.cs`.
+
+---
+
+## 13. `GlobalWorker`가 지속 업무(공지)를 한 신호씩 밀려서 배달함
+
+- **발견**: S1 통합 테스트("정상 플로우 + 소셜 + 공지") 중, 이미 로비에 있는 클라들한테
+  `/admin/announce`로 공지를 쏴도 클라 쪽에 영원히 안 뜸. `LobbyServer` 콘솔엔
+  `공지 활성화: ServerShutdownSoon`까지는 정상적으로 찍혔는데, 그 뒤로 아무 데도
+  전달이 안 됨.
+- **원인**: `GlobalWorker.ExecuteAsync` 루프가 매 반복마다 "지금 `_works`를 배달" →
+  "그다음에 `_pendingWorks`에서 새 배치를 꺼내 `_works`에 재할당" 순서로 되어 있었음.
+  방금 꺼낸 새 배치는 **이번 반복이 아니라 다음 신호가 왔을 때**에야 배달됨 - 그런데
+  다음 신호는 누군가 또 `EnterLobby`를 부르거나 공지를 또 쏴야만 발생함. 아무도 새로
+  로비에 안 들어오면 그 배치는 `_works`에 담긴 채로 영원히 배달 안 됨.
+- **예상 피해**: 이미 접속 중인 전원한테 공지를 못 보냄(이번 발견 케이스) - 앞으로
+  "지금 접속 중인 전원 + 이후 새 접속자"패턴(`GlobalWorker`)을 쓰는 기능이 늘어날수록
+  똑같이 걸림.
+- **해결 방법**: 두 `if` 블록 순서를 맞바꿔서, "꺼내기" 먼저 하고 그 결과를 "같은
+  반복 안에서" 바로 배달하도록 수정.
+- **결과**: 해결됨. `LobbyServer/Services/GlobalWorker.cs`.
+
+---
+
+## 14. `IngameFriendManager`가 인게임 친구 명령마다 네이티브 메모리 에러를 냄
+
+- **발견**: 인게임 중 친구 명령(`AddFriend` 등)을 보낼 때마다 콘솔에
+  `Invalid allocation label passed to UnsafeUtility::Free`가 찍힘. 게임 로직 자체는
+  멀쩡히 동작해서 한동안 무해한 경고로 오인했음.
+- **원인**: `SendFriendCommandAsync`가 `using var writer = new FastBufferWriter(...,
+  Allocator.Temp)`로 만든 writer를 `SendNamedMessage` 직후가 아니라
+  `return await _pendingFriendCommand.Task;` 뒤까지 들고 있었음(async 메서드에서
+  `using var`는 메서드 전체 스코프가 끝나야 Dispose됨). `Allocator.Temp`는 그 프레임
+  안에서만 유효한데, 서버 응답이 올 때까지(최소 한 프레임 이상) writer가 살아있다가
+  뒤늦게 Dispose되면서 이미 끝난 스코프의 할당을 해제하려다 터짐.
+- **예상 피해**: 네이티브 메모리 에러가 매 호출마다 누적 - 당장 크래시는 안 나지만
+  장시간 플레이 시 메모리 관리가 흔들릴 위험이 있는 잠재적 불안정 요인.
+- **해결 방법**: writer 스코프를 `SendNamedMessage` 호출 직후로 명시적으로 좁혀서
+  `await` 전에 확실히 Dispose되게 수정. (같은 패턴을 쓰는 `IngameServerInstance.cs`
+  4곳, `ClientInstance.cs` 1곳은 전부 `await` 없이 동기적으로 끝나서 문제없음을 같이
+  확인함 - 이 파일만 유일하게 예외였음.)
+- **결과**: 해결됨. `Network/Client/IngameFriendManager.cs`.
