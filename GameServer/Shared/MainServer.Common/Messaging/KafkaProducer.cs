@@ -34,6 +34,10 @@ public sealed class KafkaProducer<TKey, TValue> : IDisposable
             LingerMs = 5,
             // 배치 크기 최대화 (기본값 1MB → 4MB)
             BatchSize = 4 * 1024 * 1024,
+            // 브로커에 아예 연결이 안 되는 상황(다운 등)을 대비한 상한선.
+            // 기본값(5분)은 "죽었는지 확인"하는 사람 입장에선 사실상 무한 대기처럼
+            // 보인다 - 재시도는 하되 10초 안에는 반드시 실패로 확정 짓는다.
+            MessageTimeoutMs = 10000,
         };
         _producer = new ProducerBuilder<TKey, TValue>(config).Build();
     }

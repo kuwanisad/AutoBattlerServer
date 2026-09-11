@@ -243,14 +243,45 @@ internal sealed class LoginConnectionHandler
             return;
         }
 
+        // 로비는 owner.Address(=서버 자신의 gRPC 주소)가 곧 클라가 접속할 주소와
+        // 같다. 인게임은 다르다 - owner.Address는 게임 에이전트 자신의 gRPC 주소(서버간
+        // 통신용)라 클라가 NGO로 접속할 수 있는 주소가 아니다. 그 실제 주소는
+        // session.CurrentServer에 있다(HandlePlayerJoinedAsync가 기록해둔 것).
+        // 이 둘을 혼동해서 owner.Address를 그대로 안내했던 게 실제 버그였다
+        // (재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
+        // 게임 에이전트의 ApprovalRequest 검증은 Status==Moving인 세션만 승인한다
+        // (정상 매칭 흐름과 판단 기준을 하나로 유지하기 위함 - GameServerHandler.
+        // HandleApprovalRequestAsync 참고). 재진입은 세션이 계속 Ingame 상태였던
+        // 채로 오므로, 미리 Moving으로 바꿔주지 않으면 "잘못된 세션 상태"로 거부당한다
+        // (재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고). 로비 재진입은 이 검사가
+        // 없어서 필요 없다 - 인게임일 때만 해준다.
+        if (destinationServerType == GameServer.Common.ServerType.Ingame)
+        {
+            session.Status = PlayerStatus.Moving;
+            await _sessionRegistry.UpdateAsync(request.PlayerId, session);
+        }
+
+        var redirectAddress = destinationServerType == GameServer.Common.ServerType.Ingame
+            ? session.CurrentServer
+            : owner.Address;
+
+        if (string.IsNullOrEmpty(redirectAddress))
+        {
+            _logger.LogWarning(
+                "재진입 실패 - 클라 접속 주소를 확인할 수 없음: {PlayerId} Type={Type}",
+                request.PlayerId, destinationServerType);
+            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            return;
+        }
+
         _logger.LogInformation("재진입 성공 - 안내: {PlayerId} → {Address} ({Type})",
-            request.PlayerId, owner.Address, destinationServerType);
+            request.PlayerId, redirectAddress, destinationServerType);
 
         await TrySendAsync(responseStream, new LoginToClientMessage
         {
             Redirect = new LoginRedirect
             {
-                LobbyAddress = owner.Address,
+                LobbyAddress = redirectAddress,
                 PlayerId = request.PlayerId,
                 Token = session.CurrentToken,
                 ChatAddress = _masterConnection.ChatServerAddress,

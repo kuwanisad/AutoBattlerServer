@@ -718,7 +718,10 @@ public sealed class GameServerHandler
         if (session != null)
         {
             session.Status = PlayerStatus.Ingame;
-            session.CurrentServer = joined.RoomId;
+            // 클라가 NGO로 접속할 실제 주소(host:port, 스킴 없음)를 저장해야 한다 -
+            // 로그인 서버 재진입 시 클라에게 다시 안내해줄 유일한 출처가 이 필드다.
+            // RoomId를 넣는 실수가 있었음(발견: 재접속 테스트 중 - KNOWN_ISSUES 참고).
+            session.CurrentServer = ClientAddress;
             session.NextServer = string.Empty;
             session.OwnerServerId = _masterConnection.InstanceId;
             await _sessionRegistry.UpdateAsync(joined.PlayerId, session);

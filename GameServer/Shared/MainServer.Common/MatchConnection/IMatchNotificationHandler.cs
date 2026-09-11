@@ -10,4 +10,10 @@
 public interface IMatchNotificationHandler
 {
     void HandleMatchNotification(global::MatchingServer.MatchNotification notification);
+
+    /// <summary>매칭 서버와의 상시 연결이 끊겼을 때(재연결 시도 전) 호출된다. 그 순간
+    /// 매칭 결과를 기다리고 있던 전원에게 실패를 알려야 한다 - 안 그러면 그 클라들의
+    /// RequestMatch 스트림이 매칭 서버가 다시 살아날 때까지(또는 영원히) 응답 없이
+    /// 멈춰있게 된다.</summary>
+    void HandleConnectionLost();
 }

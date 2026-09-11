@@ -100,10 +100,10 @@ public sealed class SessionRegistryConnector : ISessionRegistry, ISessionRegistr
         await registry.RegisterServerAsync(serverId, address);
     }
 
-    public async Task RefreshServerHeartbeatAsync(string serverId)
+    public async Task RefreshServerHeartbeatAsync(string serverId, string address)
     {
         var registry = await GetRegistryAsync();
-        await registry.RefreshServerHeartbeatAsync(serverId);
+        await registry.RefreshServerHeartbeatAsync(serverId, address);
     }
 
     public async Task<bool> IsServerAliveAsync(string serverId)

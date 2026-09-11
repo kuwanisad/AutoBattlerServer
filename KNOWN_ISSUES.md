@@ -270,3 +270,136 @@
   4곳, `ClientInstance.cs` 1곳은 전부 `await` 없이 동기적으로 끝나서 문제없음을 같이
   확인함 - 이 파일만 유일하게 예외였음.)
 - **결과**: 해결됨. `Network/Client/IngameFriendManager.cs`.
+
+---
+
+## 15. 매칭 서버가 죽으면 대기 중이던 클라가 영원히 응답을 못 받음
+
+- **발견**: S2 통합 테스트("장애 주입 + 재접속 콤보") 2.4 항목 - 매칭 요청을 보내고
+  대기 중인 상태에서 매칭 서버를 강제 종료하면, 클라 콘솔에 `매칭메이킹 요청 완료`
+  이후 아무 반응이 없음(성공도 실패도 아닌 무한 대기).
+- **원인**: `MatchNotificationDispatcher`는 매칭 서버로부터 실제 알림
+  (`MatchNotification`)이 도착했을 때만 반응하는 구조였고, 매칭 서버와의 상시 연결
+  (`MatchServerConnection`) 자체가 끊기는 것에 대한 핸들러가 아예 없었음.
+  `LobbyControlService.RequestMatch`는 `await Task.Delay(Timeout.Infinite, cts.Token)`로
+  대기하는데, 이 `cts`를 취소시켜줄 유일한 경로가 알림 도착뿐이라 매칭 서버가 죽으면
+  영원히 안 풀림.
+- **예상 피해**: 매칭 서버가 죽거나 재시작될 때마다, 그 순간 대기 중이던 클라 전원이
+  응답 없이 멈춤 - 재로그인 전까지 복구 불가.
+- **해결 방법**: `IMatchNotificationHandler`에 `HandleConnectionLost()` 추가.
+  `MatchServerConnection`이 연결 끊김을 감지하는 두 경로(예외로 끝남 / 조용히 EOF로
+  끝남) 둘 다에서 이걸 호출하도록 수정(단, 이 서버 자신의 정상 종료는 제외).
+  `MatchNotificationDispatcher.HandleConnectionLost()`는 대기 중이던 전원에게 세션을
+  `Lobby`로 되돌리고 `MatchFailed{Reason="매칭 서버 연결 끊김"}`을 통보한 뒤 정리한다.
+- **결과**: 해결됨. `Shared/MainServer.Common/MatchConnection/IMatchNotificationHandler.cs`,
+  `MatchServerConnection.cs`, `LobbyServer/Services/MatchNotificationDispatcher.cs`.
+
+---
+
+## 16. `ClientInstance`가 `MatchFailed`를 아예 구독하지 않아서 매칭 실패가 조용히 사라짐
+
+- **발견**: 15번을 고친 뒤 재테스트했는데도 클라 콘솔에 여전히 아무것도 안 뜸. 로비
+  서버 로그로 서버 쪽은 정상적으로 통보를 시도했다는 게 확인됐는데도 그랬음.
+- **원인**: `GrpcLobbyChannel`/`LobbyClient`까지는 `OnMatchFailed` 이벤트가 정상적으로
+  배선돼 있었지만, `ClientInstance.InitializeLobbyClient()`가 `OnMatchFound`/
+  `OnEnterLobbySuccess`/`OnConflictingSession`은 구독하면서 `OnMatchFailed`만 빠뜨림.
+  이벤트는 정확히 발생했지만 아무도 안 듣고 있어서 로그 한 줄 없이 사라짐.
+- **예상 피해**: 매칭 실패(매칭 서버 다운뿐 아니라 향후 다른 사유로 인한 실패도 전부
+  포함)가 클라에 어떤 형태로도 전달 안 됨 - 사용자는 매칭이 그냥 멈춘 것처럼 보임.
+- **해결 방법**: `InitializeLobbyClient()`에 `LobbyClient.OnMatchFailed += OnMatchFailed;`
+  추가, 최소한 로그로는 보이는 핸들러 구현(재시도 UI 등 실제 사용자 대응은 TODO).
+- **결과**: 해결됨. `Network/Client/ClientInstance.cs`.
+
+---
+
+## 17. Redis가 재시작되면 서버가 영영 "등록 안 된 서버"로 남음
+
+- **발견**: "브로커 다운 상태에서 운영" 테스트 - Redis를 내렸다 올린 뒤, 이미 떠있던
+  서버들 콘솔에 `서버 하트비트 갱신 실패 - 등록되지 않은 서버(server:...)`가 계속
+  반복해서 찍힘. Redis가 죽어있는 동안은 문제없었는데(하트비트 실패만 로그로 남기고
+  계속 재시도), 복구된 뒤에도 계속 실패함.
+- **원인**: `RegisterServerAsync`는 서버 기동 시 딱 한 번만 호출되고, 이후
+  `RefreshServerHeartbeatAsync`는 `KeyExpireAsync`(기존 키의 TTL만 갱신)만 시도함.
+  Redis가 재시작되면서 데이터가 날아가 `server:{id}` 키 자체가 사라졌는데, 갱신
+  로직은 "키가 없으면 다시 만든다"는 자가 복구 경로가 없어서 그 서버는 프로세스가
+  멀쩡히 살아있어도 영영 등록 안 된 상태로 남음.
+- **예상 피해**: `IsServerAliveAsync`로 생존을 확인하는 모든 로직(예: 매칭 서버가
+  수용 가능한 인게임 서버를 찾는 `FindAvailableIngameServerAsync`)이 이 서버를
+  계속 "죽었다"고 오판 - Redis에 순간적인 장애(재시작 등)만 있었어도 그 이후로
+  해당 서버가 매칭 후보에서 영구적으로 배제됨(재시작 전까지).
+- **해결 방법**: `RefreshServerHeartbeatAsync`가 address 인자를 받도록 시그니처
+  변경. `KeyExpireAsync`가 실패(키 없음)하면 그 자리에서 `StringSetAsync`로 즉시
+  재등록하도록 수정 - 갱신 실패를 "당장 고칠 수 있는 상황"으로 바꿈.
+- **결과**: 해결됨. `Shared.Common/Redis/ISessionRegistry.cs`,
+  `RedisSessionRegistry.cs`, `SessionRegistryConnector.cs`,
+  `MainServer.Common/Heartbeat/ServerHeartbeatService.cs`.
+
+---
+
+## 18. Kafka 브로커가 죽어있으면 발행 요청이 5분 동안 안 끝남
+
+- **발견**: "브로커 다운 상태에서 운영" 테스트 - Kafka를 내린 상태에서
+  `LobbyServer`의 `/test/kafka`를 호출했더니 서버가 죽지는 않았지만 요청이 몇 분이
+  지나도 응답을 안 함(사실상 멈춘 것처럼 보임).
+- **원인**: `KafkaProducer`의 `ProducerConfig`에 `MessageTimeoutMs`를 명시적으로
+  설정 안 해서 Confluent.Kafka 기본값(5분)을 그대로 씀. 브로커가 아예 응답이 없는
+  상황에서는 그 5분을 다 채우고 나서야 실패로 확정됨.
+- **예상 피해**: 크래시는 아니지만, Kafka 장애 시 그 발행 경로를 쓰는 요청들이
+  최대 5분씩 스레드/커넥션을 붙잡고 있게 됨 - 운영 환경에서는 이게 누적되면
+  사실상 서비스 마비와 다를 바 없음.
+- **해결 방법**: `MessageTimeoutMs = 10000`(10초)을 명시적으로 설정해서 상한선을
+  현실적인 값으로 낮춤.
+- **결과**: 해결됨. `MainServer.Common/Messaging/KafkaProducer.cs`.
+
+---
+
+## 19. 인게임 접속 시 세션에 재접속 주소 대신 RoomId를 저장함
+
+- **발견**: "인게임 도중 연결 끊김 → 유예 시간 내 재접속" 테스트 중, 재접속 시도가
+  아니라 완전히 새로 로그인해서 재진입하는 경로를 테스트하다가, 클라가 안내받은
+  주소(`https://localhost:7000`)로 접속을 시도하자마자 `게임 서버 주소 파싱 실패`가 남.
+- **원인**: `GameServerHandler.HandlePlayerJoinedAsync`가
+  `session.CurrentServer = joined.RoomId;`로 되어 있었음 - 클라가 나중에 재진입할 때
+  써야 할 실제 NGO 접속 주소(host:port) 대신 방 ID(GUID)를 저장하고 있었음.
+- **예상 피해**: 로그인 서버를 거치는 재진입(`LoginConnectionHandler`)이 이 값을
+  그대로 클라에게 안내하므로, 재진입을 시도하는 모든 케이스가 실패함.
+- **해결 방법**: `session.CurrentServer = ClientAddress;`(실제 클라 접속 주소)로 수정.
+- **결과**: 해결됨. `GameAgent/Services/GameServerHandler.cs`.
+
+---
+
+## 20. 로그인 서버 재진입이 세션 상태를 안 바꿔줘서 게임 에이전트가 거부함
+
+- **발견**: 19번을 고친 뒤에도 재진입이 여전히 실패 - 이번엔 게임 에이전트 콘솔에
+  `접속 거부: 사유=잘못된 세션 상태: Ingame`이 찍힘.
+- **원인**: `GameServerHandler.HandleApprovalRequestAsync`의 `ApprovalRequest` 검증은
+  `session.Status == Moving`인 경우만 승인한다(정상 매칭 흐름과 판단 기준을 하나로
+  유지하기 위함). 그런데 로그인 서버의 재진입 로직은 클라를 인게임 서버로 돌려보내기
+  전에 세션 상태를 `Moving`으로 바꿔주는 걸 빠뜨려서, 세션이 계속 `Ingame` 상태인 채로
+  접속 시도가 들어와 거부당함.
+- **예상 피해**: 재진입 자체가 구조적으로 항상 실패 - 19번만 고쳐서는 재진입이 완성이
+  안 됨.
+- **해결 방법**: `LoginConnectionHandler`가 인게임으로 안내하기 직전에
+  `session.Status = PlayerStatus.Moving`으로 갱신 후 저장하도록 수정. 로비 재진입은
+  이 검사 자체가 없어서 그대로 둠.
+- **결과**: 해결됨. `LoginServer/Services/LoginConnectionHandler.cs`.
+
+---
+
+## 21. NGO 재접속 시 StartClient()가 "이미 실행 중"이라고 거부함
+
+- **발견**: 재접속 테스트 중 클라 콘솔에 `[Netcode] Cannot start Client while an
+  instance is already running`가 반복적으로 뜸. 서버 쪽에서 클라를 강제로 끊는
+  테스트 트리거와 맞물려 접속-거부-재시도가 무한 반복되는 상황까지 발생함.
+- **원인**: NGO의 `OnClientDisconnectCallback`이 호출되는 시점엔 `NetworkManager`
+  내부 종료 절차가 아직 시작조차 안 됐을 수 있음. 처음엔 `ShutdownInProgress`
+  플래그만 폴링하는 방식으로 고쳤는데, 그 플래그 자체가 아직 `false`인 채로 대기를
+  그냥 통과해버려서 근본적으로 해결이 안 됐음.
+- **예상 피해**: NGO 접속이 예기치 않게 끊긴 뒤의 빠른 재접속 경로, 그리고 로그인
+  서버를 거치는 재진입 경로 둘 다 구조적으로 실패할 수 있음.
+- **해결 방법**: 인게임 접속 진입점 3곳(매치 확정/로그인 재진입/빠른 재접속)을
+  `ConnectToIngameServerAsync` 하나로 통합하고, 그 안에서 `IsListening` +
+  `ShutdownInProgress`를 같이 확인하면서 실제 시간 간격(100ms, 최대 2초)을 두고
+  재시도하는 `WaitForNetworkManagerShutdownAsync`로 교체. 외부에서 취소할 수 있게
+  `CancellationToken`도 받게 함(`_cts.Token`과 묶임).
+- **결과**: 해결됨(추가 실전 재확인 필요). `Network/Client/ClientInstance.cs`.

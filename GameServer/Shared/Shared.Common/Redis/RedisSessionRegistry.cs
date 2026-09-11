@@ -133,16 +133,20 @@ public sealed class RedisSessionRegistry : ISessionRegistry, IRateLimiter, IDisp
         _logger.LogInformation("서버 등록: {ServerId} @ {Address}", serverId, address);
     }
 
-    public async Task RefreshServerHeartbeatAsync(string serverId)
+    public async Task RefreshServerHeartbeatAsync(string serverId, string address)
     {
         var key = ServerKeyPrefix + serverId;
         var refreshed = await _db.KeyExpireAsync(key, ServerHeartbeatConstants.Ttl);
 
         if (!refreshed)
         {
-            // 키가 없다는 뜻 - RegisterServerAsync를 안 불렀거나, TTL이 이미 만료된 뒤라는 신호.
+            // 키가 없다는 뜻 - Redis가 재시작돼 데이터가 날아갔거나, TTL이 이미 만료된
+            // 뒤라는 신호. 그냥 경고만 남기면 이 서버는 프로세스가 멀쩡히 살아있는데도
+            // 영영 "등록 안 된 서버"로 남아서 매칭 대상 등에서 계속 빠지게 된다 -
+            // RegisterServerAsync와 동일하게 다시 써서 스스로 복구한다.
+            await _db.StringSetAsync(key, address, ServerHeartbeatConstants.Ttl);
             _logger.LogWarning(
-                "서버 하트비트 갱신 실패 - 등록되지 않은 서버(server:{ServerId}). RegisterServerAsync 호출 여부 확인 필요.",
+                "서버 하트비트 갱신 실패 - 등록되지 않은 서버(server:{ServerId}) → 재등록함",
                 serverId);
         }
     }

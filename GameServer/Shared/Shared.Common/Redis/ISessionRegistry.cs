@@ -43,10 +43,12 @@ public interface ISessionRegistry
 
     /// <summary>
     /// 서버 생존 TTL을 갱신한다. 메인 서버가 5초마다 호출한다. TTL=10초.
-    /// 값(주소)은 건드리지 않고 TTL만 갱신한다 - 하트비트에 불필요한 부하를 주지 않기 위함.
+    /// 값(주소)은 건드리지 않고 TTL만 갱신하는 게 기본이지만, 키가 아예 없으면(Redis가
+    /// 재시작돼 데이터가 날아간 경우 등) address로 다시 등록한다 - 그렇지 않으면 서버
+    /// 프로세스 자체는 멀쩡한데 영영 "등록 안 된 서버"로 남아버린다.
     /// TTL이 만료되면 해당 서버가 죽은 것으로 간주한다.
     /// </summary>
-    Task RefreshServerHeartbeatAsync(string serverId);
+    Task RefreshServerHeartbeatAsync(string serverId, string address);
 
     /// <summary>서버가 살아있는지 확인한다.</summary>
     Task<bool> IsServerAliveAsync(string serverId);

@@ -59,6 +59,55 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
         _ = HandleMatchNotificationSafeAsync(notification);
     }
 
+    /// <summary>매칭 서버와의 연결이 끊겼을 때 - 지금 결과를 기다리고 있는 전원에게
+    /// 일괄적으로 매칭 실패를 통보한다. 매칭 서버가 재연결되면 그 전원은 다시 처음부터
+    /// RequestMatch를 새로 열어야 한다(대기 중이던 매치 자체는 매칭 서버 쪽 메모리와
+    /// 함께 이미 사라졌으므로 이어서 재개할 방법이 없다).</summary>
+    public void HandleConnectionLost()
+    {
+        _ = HandleConnectionLostSafeAsync();
+    }
+
+    private async Task HandleConnectionLostSafeAsync()
+    {
+        // 이 시점 이후에 새로 등록되는 플레이어까지 잘못 쓸어가지 않도록, 지금 스냅샷만
+        // 떼어내고 딕셔너리는 즉시 비운다(재연결 뒤 새 대기열은 새로 채워짐).
+        var stranded = _pendingStreams.ToArray();
+        _pendingStreams.Clear();
+
+        if (stranded.Length == 0) return;
+
+        _logger.LogWarning("매칭 서버 연결 끊김 - 대기 중이던 {Count}명에게 매칭 실패 통보", stranded.Length);
+
+        foreach (var (playerId, pending) in stranded)
+        {
+            try
+            {
+                var session = await _sessionRegistry.GetAsync(playerId);
+                if (session != null)
+                {
+                    session.Status = PlayerStatus.Lobby;
+                    session.NextServer = string.Empty;
+                    await _sessionRegistry.UpdateAsync(playerId, session);
+                }
+
+                await pending.Stream.WriteAsync(new MatchEvent
+                {
+                    MatchFailed = new MatchFailed { Reason = "매칭 서버 연결 끊김" },
+                });
+            }
+            catch (Exception ex)
+            {
+                // 클라가 그 사이 이미 끊겼을 수 있음 - 그래도 나머지는 계속 통보해야 하므로 개별 처리.
+                _logger.LogWarning(ex, "매칭 실패 통보 중 오류: {PlayerId}", playerId);
+            }
+            finally
+            {
+                pending.Cts.Cancel();
+            }
+        }
+    }
+
     private async Task HandleMatchNotificationSafeAsync(global::MatchingServer.MatchNotification notification)
     {
         try

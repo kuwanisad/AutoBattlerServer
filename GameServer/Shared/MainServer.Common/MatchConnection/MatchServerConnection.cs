@@ -70,6 +70,15 @@ public sealed class MatchServerConnection : BackgroundService
             try
             {
                 await RunSingleConnectionAsync(stoppingToken);
+
+                // 예외 없이 리턴된 것도 사실상 연결이 끊긴 것이다 - 매칭 서버가 스트림을
+                // 조용히 닫았을 때(하트비트 타임아웃이 아니라 정상 EOF) 이 경로로 온다.
+                // stoppingToken이 걸린 게 아니라면(=이 서버 자신의 종료가 아니라면)
+                // 매칭 서버 쪽 문제이므로 통보해야 한다.
+                if (!stoppingToken.IsCancellationRequested)
+                {
+                    _notificationHandler?.HandleConnectionLost();
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -80,6 +89,7 @@ public sealed class MatchServerConnection : BackgroundService
                 _logger.LogWarning(ex,
                     "매칭 서버 접속이 끊겼거나 실패했습니다. {Delay:F0}초 뒤 재시도합니다.",
                     ConnectionConstants.ReconnectDelay.TotalSeconds);
+                _notificationHandler?.HandleConnectionLost();
             }
 
             try

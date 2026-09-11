@@ -55,7 +55,7 @@ public sealed class ServerHeartbeatService : BackgroundService
             try
             {
                 await Task.Delay(ServerHeartbeatConstants.Interval, stoppingToken);
-                await _sessionRegistry.RefreshServerHeartbeatAsync(_options.InstanceId);
+                await _sessionRegistry.RefreshServerHeartbeatAsync(_options.InstanceId, _options.SelfAddress);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
