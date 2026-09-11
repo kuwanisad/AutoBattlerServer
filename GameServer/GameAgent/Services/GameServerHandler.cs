@@ -781,10 +781,18 @@ public sealed class GameServerHandler
             return;
         }
 
-        // 재접 가능한 방 - 소유권은 그대로 이 게임 에이전트가 들고 있는다 (session은 안 건드림).
-        // 클라가 재접속하면 EnterLobby가 "이 게임 에이전트로 가라"고 리다이렉트해준다.
-        // 유예 시간 안에 재접속을 확인 못 하면(HandlePlayerJoinedAsync로 다시 안 들어오면)
-        // 그때 세션을 완전히 삭제한다 (재접속 정책 - "게임 중 재접속 유예 시간 실패" 결정 반영).
+        // 재접 가능한 방 - 소유권은 그대로 이 게임 에이전트가 들고 있는다 (OwnerServerId 등은
+        // 안 건드림). 다만 Status는 Moving으로 바꿔둬야 한다 - ApprovalRequest 검증이
+        // Status==Moving만 승인하는데, 여기서 안 바꾸면 재접속 시도 자체가 "잘못된 세션
+        // 상태: Ingame"으로 거부당한다(재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
+        // 클라가 재접속하면 HandlePlayerJoinedAsync가 다시 Ingame으로 되돌려놓는다.
+        var reconnectableSession = await _sessionRegistry.GetAsync(left.PlayerId);
+        if (reconnectableSession != null)
+        {
+            reconnectableSession.Status = PlayerStatus.Moving;
+            await _sessionRegistry.UpdateAsync(left.PlayerId, reconnectableSession);
+        }
+
         _logger.LogInformation("재접 가능한 방 - 유예 시간({Grace}) 시작: {PlayerId} (RoomId={RoomId})",
             ReconnectGracePeriod, left.PlayerId, left.RoomId);
 

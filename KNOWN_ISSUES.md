@@ -403,3 +403,42 @@
   재시도하는 `WaitForNetworkManagerShutdownAsync`로 교체. 외부에서 취소할 수 있게
   `CancellationToken`도 받게 함(`_cts.Token`과 묶임).
 - **결과**: 해결됨(추가 실전 재확인 필요). `Network/Client/ClientInstance.cs`.
+
+---
+
+## 22. 게임 에이전트가 재접 가능한 방에서 세션 상태를 안 바꿔줘서 자기 검증에 걸림
+
+- **발견**: 21번까지 고친 뒤에도 빠른 재접속 경로(로그인 서버를 안 거치는 쪽)만
+  여전히 실패 - 게임 에이전트 콘솔에 `접속 거부: 사유=잘못된 세션 상태: Ingame`
+  반복. 20번과 증상은 같지만 경로가 달랐음(20번은 로그인 서버 경유 재진입, 이건
+  빠른 재접속).
+- **원인**: `HandlePlayerLeftAsync`의 "재접 가능한 방" 분기 주석에 "session은 안
+  건드림"이라고 명시돼 있었음 - 클라 이탈 시 `Status`를 그대로 `Ingame`에 둔 채
+  유예 타이머만 돌림. 그런데 `HandleApprovalRequestAsync`는 `Status==Moving`만
+  승인하므로, 게임 에이전트 자기 자신이 만든 두 코드가 서로 모순돼서 재접속
+  시도 자체가 항상 거부당함 - 로그인 서버를 거치지 않는 경로라 20번 수정으로는
+  못 잡았음.
+- **예상 피해**: 빠른 재접속 경로가 사실상 한 번도 성공할 수 없는 구조적 결함 -
+  네트워크가 잠깐 끊겼다 붙는 흔한 상황에서 항상 실패.
+- **해결 방법**: `HandlePlayerLeftAsync`의 재접 가능한 방 분기에서
+  `session.Status = PlayerStatus.Moving`으로 갱신 후 저장하도록 추가. 재접속 성공 시
+  `HandlePlayerJoinedAsync`가 다시 `Ingame`으로 되돌려놓아 정상 순환됨.
+- **결과**: 해결됨. `GameAgent/Services/GameServerHandler.cs`.
+
+---
+
+## 23. 인게임 접속 콜백이 재접속마다 중복 구독됨
+
+- **발견**: 22번까지 고쳐서 재접속 자체는 성공했는데, 콘솔에 `NGO 접속 성공`이
+  한 번의 접속에 두 번씩 찍힘.
+- **원인**: `ConnectToIngameServerAsync`가 접속 시도마다(최초 접속/빠른 재접속/
+  재진입) 매번 호출되는데, 그 안에서 `networkManager.OnClientConnectedCallback
+  += OnNgoClientConnected;`를 구독 해제 없이 `+=`만 하고 있었음. 같은
+  `NetworkManager` 인스턴스에 매번 쌓이기만 해서, 두 번째 접속부턴 콜백이
+  중복 호출됨(세 번째면 3번, 계속 누적).
+- **예상 피해**: 재접속을 반복할수록 `SendPlayerJoinedAsync` 등 접속 시점에
+  실행되는 로직 전부가 중복 실행 - 당장은 로그만 중복이지만, 나중에 접속 시점에
+  부수 효과가 있는 로직이 추가되면 그대로 중복 실행되는 잠재적 위험.
+- **해결 방법**: 구독 전에 `-=`로 먼저 확실히 해제한 뒤 `+=`로 다시 구독(최초
+  호출이라 구독된 적이 없어도 `-=`는 안전하게 무시됨).
+- **결과**: 해결됨. `Network/Client/ClientInstance.cs`.
