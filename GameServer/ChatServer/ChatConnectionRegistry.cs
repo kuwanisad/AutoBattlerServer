@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Threading;
 
 namespace ChatServer;
 
@@ -29,4 +30,16 @@ public sealed class ChatConnection
 {
     public string PlayerId { get; init; } = string.Empty;
     public WebSocket WebSocket { get; init; } = null!;
+
+    // 이 WebSocket의 유일한 조작자는 이 연결을 소유한 ReceiveLoopAsync 태스크뿐이어야
+    // 한다. 외부(SessionInvalidatedSubscriber 등)가 강제로 끊어야 할 때도 WebSocket을
+    // 직접 건드리지 않고 이 토큰만 취소한다 - 실제 종료(CloseOutputAsync 등)는 소유
+    // 태스크가 취소를 감지한 뒤 자기 쪽에서 수행한다. (예전엔 외부에서 직접
+    // WebSocket.CloseAsync를 불러서, 소유 태스크가 이미 걸어둔 ReceiveAsync와 충돌해
+    // 영원히 멈추는 버그가 있었다 - KNOWN_ISSUES.md 참고.)
+    public CancellationTokenSource Cts { get; } = new();
+
+    // 외부가 강제 종료를 요청할 때 이유를 여기 남겨두면, 실제 종료를 수행하는 소유
+    // 태스크가 그 이유로 클라에게 정상적인 Close 프레임을 보낼 수 있다.
+    public string? ForceCloseReason { get; set; }
 }

@@ -442,3 +442,59 @@
 - **해결 방법**: 구독 전에 `-=`로 먼저 확실히 해제한 뒤 `+=`로 다시 구독(최초
   호출이라 구독된 적이 없어도 `-=`는 안전하게 무시됨).
 - **결과**: 해결됨. `Network/Client/ClientInstance.cs`.
+
+---
+
+## 24. 채팅 서버가 남의 WebSocket을 외부에서 직접 닫으려다 영원히 멈춤
+
+- **발견**: "로비 연결 끊김 → 세션 삭제 + 채팅 서버 연결도 같이 끊기는지" 테스트 중,
+  로비 세션은 정상 삭제됐지만 채팅 연결은 안 끊김. 강제 종료 성공/실패 로그가
+  둘 다 안 찍힌 채 그냥 멈춰있었음.
+- **원인**: `SessionInvalidatedSubscriber`(RabbitMQ 구독 콜백 - 그 연결과 무관한
+  별도 실행 컨텍스트)가 전역 `ChatConnectionRegistry`에서 연결을 찾아
+  `WebSocket.CloseAsync()`를 직접 호출했음. `CloseAsync`는 상대방의 종료 응답을
+  기다리느라 내부적으로 자기가 직접 `ReceiveAsync`를 한 번 더 호출하는데, 그
+  WebSocket은 이미 `WebSocketHandler.ReceiveLoopAsync`(그 연결을 소유한 별도
+  태스크)가 자기 몫의 `ReceiveAsync`로 대기 중이었음 - 동시에 두 개의 읽기가
+  충돌하면서 영원히 안 끝남.
+- **예상 피해**: 세션이 삭제된 뒤에도 채팅 연결이 좀비 상태로 남아 계속 서비스가
+  됨 - "메인 서버가 세션을 지우면 채팅 서버도 즉시 따라 끊는다"는 원칙이 실제로는
+  전혀 지켜지지 않고 있었음.
+- **해결 방법**: 근본 원인은 "연결을 소유하지 않은 외부 태스크가 그 WebSocket을
+  직접 조작"한 것이었으므로, 단순히 `CloseOutputAsync`로 바꾸는 패치가 아니라
+  소유권 모델 자체를 정리함 - `ChatConnection`에 자기 소유 `CancellationTokenSource`
+  추가, `ReceiveLoopAsync`가 이 토큰으로 `ReceiveAsync`를 걺. 외부(구독자)는 이제
+  WebSocket을 전혀 안 건드리고 이 토큰만 취소하며, 실제 종료(`CloseOutputAsync`)는
+  그 연결을 소유한 `ReceiveLoopAsync` 자신이 취소를 감지한 뒤 수행. "이 WebSocket의
+  유일한 조작자는 소유 태스크뿐"이라는 원칙을 지키도록 재설계.
+- **결과**: 해결됨. `ChatServer/ChatConnectionRegistry.cs`, `WebSocketHandler.cs`,
+  `SessionInvalidatedSubscriber.cs`.
+
+---
+
+## 25. 인게임 접속 시도에 타임아웃이 없어서 성공도 실패도 없이 영원히 멈출 수 있음
+
+- **발견**: "로그인 서버 재진입 - 도착지 서버 사망/토큰 만료 상태에서 재로그인"(이른바
+  "대참사" 시나리오, `ARCHITECTURE.md` 참고) 테스트 중 - 게임 에이전트를 죽인 직후
+  세션 레지스트리 TTL이 아직 안 지난 상태에서 재진입을 시도했더니, 로그인 서버는
+  (죽은) 게임 서버 주소로 정확히 안내했지만, 클라가 그 주소로 NGO 접속을 시도한
+  뒤 `NGO 접속 성공`도 `NGO 접속 끊김`도 전혀 안 뜨고 그대로 멈춤.
+- **원인**: 대상 서버가 아예 응답이 없는 경우(주소에 아무도 없음, 또는 게임 서버는
+  살아있어도 `ConnectionApproval`이 게임 에이전트에 검증을 요청한 뒤 그 게임
+  에이전트가 죽어서 응답을 영원히 못 받는 경우), NGO가 `OnClientConnectedCallback`도
+  `OnClientDisconnectCallback`도 아예 안 불러줌. 접속 시도 자체에 타임아웃이 없어서
+  이 상태를 감지할 방법이 없었음.
+- **예상 피해**: `ARCHITECTURE.md`가 명시한 설계 의도("자동 재시도 없이 조용히
+  실패하고 사람이 재시도")가 "조용히 실패"가 아니라 "실패 신호조차 없이 무한정
+  멈춤"이 되어버림 - 나중에 "연결이 끊겼습니다" UI를 붙이려 해도 붙일 시점 자체가
+  없음. 서버 쪽도 대칭적으로 `ConnectionApproval`을 `Pending` 상태로 영원히 들고
+  있어 좀비 상태가 됨.
+- **해결 방법**: 클라-서버 공용 타임아웃 상수
+  (`AutoBattler.Network.NetworkTimeouts.ConnectApprovalTimeout`, 10초) 신설.
+  클라는 `ConnectToIngameServerAsync`에서 접속 시도마다 이 시간 안에 성공/실패
+  콜백이 없으면 `NetworkManager.Shutdown()`으로 포기. 서버도 `ConnectionApproval`을
+  `Pending`으로 돌린 직후 같은 시간을 기다렸다가, 응답이 없으면 거부 처리해서
+  좀비 상태를 방지. **포기한 뒤 무엇을 할지(로그인 서버 재진입/UI 안내/프로그램
+  종료)는 프로젝트 취향에 따라 갈리는 결정이라 TODO로 남겨두고 구현은 안 함.**
+- **결과**: 해결됨(접속 시도 중단까지). `Network/NetworkTimeouts.cs`(신규),
+  `Network/Client/ClientInstance.cs`, `Network/Server/IngameServerInstance.cs`.

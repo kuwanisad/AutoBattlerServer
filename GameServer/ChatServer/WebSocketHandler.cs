@@ -85,6 +85,7 @@ public sealed class WebSocketHandler
         finally
         {
             _connections.Unregister(playerId);
+            connection.Cts.Dispose();
             _logger.LogInformation("채팅 서버 퇴장: {PlayerId}", playerId);
         }
     }
@@ -98,7 +99,7 @@ public sealed class WebSocketHandler
             while (connection.WebSocket.State == WebSocketState.Open)
             {
                 var result = await connection.WebSocket.ReceiveAsync(
-                    new ArraySegment<byte>(buffer), CancellationToken.None);
+                    new ArraySegment<byte>(buffer), connection.Cts.Token);
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -111,6 +112,25 @@ public sealed class WebSocketHandler
 
                 var message = ClientChatMessage.Parser.ParseFrom(buffer, 0, result.Count);
                 await HandleMessageAsync(connection, message);
+            }
+        }
+        catch (OperationCanceledException) when (connection.Cts.IsCancellationRequested)
+        {
+            // 외부(SessionInvalidatedSubscriber 등)가 강제 종료를 요청한 경우 - 이
+            // 태스크가 이 WebSocket의 유일한 조작자이므로, 여기서 직접 종료 프레임을
+            // 보낸다. CloseOutputAsync를 쓰는 이유: 상대방 응답까지 기다리는
+            // CloseAsync는 필요 없고(이미 끝내기로 결정된 연결이라 응답을 기다릴
+            // 이유가 없음), 클라가 이미 죽어있을 수도 있어서 빠르게 끝내는 쪽이 안전함.
+            try
+            {
+                await connection.WebSocket.CloseOutputAsync(
+                    WebSocketCloseStatus.PolicyViolation,
+                    connection.ForceCloseReason ?? "서버에 의한 강제 종료",
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "강제 종료 프레임 전송 실패(이미 끊겼을 수 있음): {PlayerId}", connection.PlayerId);
             }
         }
         catch (WebSocketException ex)
