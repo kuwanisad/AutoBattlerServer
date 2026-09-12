@@ -7,6 +7,7 @@ using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Auth;
 using Shared.Common.Auth.Debug;
+using Shared.Common.Endpoints;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,7 +16,7 @@ var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsetting
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
 // 게임 서버(Unity)가 gRPC로 접속하는 포트(7000) + REST 테스트용 포트(7001)
-builder.ConfigureGameServerEndpoints(grpcPort: 7000, httpPort: 7001);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.GameAgentGrpc, httpPort: ServerPorts.GameAgentHttp);
 
 builder.Services.AddGrpc();
 

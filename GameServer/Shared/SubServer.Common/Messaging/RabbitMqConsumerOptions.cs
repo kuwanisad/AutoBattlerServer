@@ -1,14 +1,16 @@
+using Shared.Common.Endpoints;
+
 namespace SubServer.Common.Messaging;
 
 /// <summary>RabbitMQ 컨슈머 설정. appsettings.json의 "RabbitMQ" 섹션에 매핑된다.</summary>
 public sealed class RabbitMqConsumerOptions
 {
     public const string SectionName = "RabbitMQ";
-    public string Host { get; set; } = "localhost";
-    public int Port { get; set; } = 5672;
-    public string UserName { get; set; } = "guest";
-    public string Password { get; set; } = "guest";
-    public string VirtualHost { get; set; } = "/";
+    public string Host { get; set; } = InfraDefaults.RabbitMqHost;
+    public int Port { get; set; } = InfraDefaults.RabbitMqPort;
+    public string UserName { get; set; } = InfraDefaults.RabbitMqUserName;
+    public string Password { get; set; } = InfraDefaults.RabbitMqPassword;
+    public string VirtualHost { get; set; } = InfraDefaults.RabbitMqVirtualHost;
 
     /// <summary>
     /// 구독할 큐 이름. work queue 패턴에서는 하위 서버 종류별로 전용 큐를 쓴다.

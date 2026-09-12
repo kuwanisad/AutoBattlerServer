@@ -2,6 +2,7 @@ using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MatchingServer.Registry;
 using MatchingServer.Services;
+using Shared.Common.Endpoints;
 using Shared.Common.Hosting;
 using Shared.Common.Redis;
 
@@ -10,7 +11,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.ConfigureGameServerEndpoints(grpcPort: 6000);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.MatchingGrpc);
 
 // 마스터 서버 연결
 builder.Services.Configure<MasterConnectionOptions>(

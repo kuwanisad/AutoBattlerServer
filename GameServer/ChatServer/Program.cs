@@ -4,6 +4,7 @@ using Shared.Common.Hosting;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Shared.Common.Endpoints;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,7 +15,7 @@ builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnCha
 // 클라이언트 WebSocket 포트(8000, HTTP/1.1)/마스터 서버 gRPC 포트(8001, HTTP/2) -
 // 다른 서버들과 포트 역할이 반대(주 포트가 gRPC가 아니라 WebSocket)라, 그대로 맞춰서
 // 이름 있는 인자로 넘긴다.
-builder.ConfigureGameServerEndpoints(grpcPort: 8001, httpPort: 8000);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.ChatGrpc, httpPort: ServerPorts.ChatHttp);
 
 builder.Services.Configure<ChatServerOptions>(
     builder.Configuration.GetSection(ChatServerOptions.SectionName));

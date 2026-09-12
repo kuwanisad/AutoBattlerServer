@@ -7,6 +7,7 @@ using MainServer.Common.MasterConnection;
 using MainServer.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Auth;
+using Shared.Common.Endpoints;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,7 +15,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.ConfigureGameServerEndpoints(grpcPort: 5500, httpPort: 5501);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.AccountGrpc, httpPort: ServerPorts.AccountHttp);
 
 builder.Services.Configure<MasterConnectionOptions>(
     builder.Configuration.GetSection(MasterConnectionOptions.SectionName));

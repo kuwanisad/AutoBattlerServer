@@ -1,5 +1,6 @@
 using MasterServer;
 using GameServer.Common;
+using Shared.Common.Endpoints;
 
 namespace MainServer.Common.MasterConnection;
 
@@ -9,13 +10,13 @@ public sealed class MasterConnectionOptions
     public const string SectionName = "MasterConnection";
 
     /// <summary>마스터 서버 gRPC 엔드포인트 (예: http://localhost:5100).</summary>
-    public string MasterAddress { get; set; } = "http://localhost:5100";
+    public string MasterAddress { get; set; } = ServerAddresses.DefaultMasterAddress;
 
     /// <summary>이 메인 서버 인스턴스의 고유 식별자.</summary>
     public string InstanceId { get; set; } = Guid.NewGuid().ToString("N");
 
     /// <summary>게임 클라이언트(또는 다른 서버)가 이 인스턴스에 접속할 주소.</summary>
-    public string SelfAddress { get; set; } = "localhost:5200";
+    public string SelfAddress { get; set; } = ServerAddresses.DefaultSelfAddress;
 
     /// <summary>
     /// 이 인스턴스의 서버 타입. 로비 서버면 Lobby, 인게임 서버면 Ingame.

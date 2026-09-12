@@ -1,10 +1,12 @@
+using Shared.Common.Endpoints;
+
 namespace SubServer.Common.Messaging;
 
 /// <summary>Kafka 컨슈머 설정. appsettings.json의 "Kafka" 섹션에 매핑된다.</summary>
 public sealed class KafkaConsumerOptions
 {
     public const string SectionName = "Kafka";
-    public string BootstrapServers { get; set; } = "localhost:9092";
+    public string BootstrapServers { get; set; } = InfraDefaults.KafkaBootstrapServers;
 
     /// <summary>
     /// 컨슈머 그룹 ID. 같은 그룹에 속한 컨슈머들은 토픽의 파티션을 나눠서 처리한다.

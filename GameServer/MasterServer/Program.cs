@@ -5,6 +5,7 @@ using MasterServer.Debug;
 using MasterServer.Registry;
 using MasterServer.Security;
 using MasterServer.Services;
+using Shared.Common.Endpoints;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,7 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 var sharedConfigPath = Path.Combine(AppContext.BaseDirectory, "shared.appsettings.json");
 builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnChange: true);
 
-builder.ConfigureGameServerEndpoints(grpcPort: 5100, httpPort: 5101);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.MasterGrpc, httpPort: ServerPorts.MasterHttp);
 
 // KeepAlivePing 설정은 공용 메서드가 다루는 범위 밖이라(마스터 서버 전용 튜닝) 별도로
 // 이어붙인다 - ConfigureKestrel은 여러 번 호출해도 누적 적용된다.

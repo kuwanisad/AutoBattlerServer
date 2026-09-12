@@ -5,6 +5,7 @@ using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using Shared.Common.Hosting;
 using SubServer.Common.Messaging;
+using Shared.Common.Endpoints;
 using Shared.Common.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,7 +20,7 @@ builder.Configuration.AddJsonFile(sharedConfigPath, optional: false, reloadOnCha
 
 // 하위 서버는 gRPC 서비스를 직접 서빙하지 않으므로(AccountServer/로비/게임에이전트를
 // 부르기만 함) 포트 하나로 충분하다 - 헬스체크 REST용.
-builder.ConfigureGameServerEndpoints(grpcPort: 5300);
+builder.ConfigureGameServerEndpoints(grpcPort: ServerPorts.DummySubServerGrpc);
 
 // 마스터 서버 연결 - 우편함 시스템 도입 전까지는 하위 서버가 아예 마스터에 등록조차
 // 안 했었다(Kafka/RabbitMQ만 구독). 이제 세션 레지스트리 조회 + 계정/로비/게임에이전트
