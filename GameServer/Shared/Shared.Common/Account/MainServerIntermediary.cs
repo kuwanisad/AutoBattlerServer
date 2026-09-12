@@ -61,6 +61,13 @@ public abstract class MainServerIntermediary
         return false; // 애초에 등록된 적 없거나, 이미 소비됐거나, 이미 만료돼서 지워짐
     }
 
+    /// <summary>이 플레이어 앞으로 등록된 티켓이 지금 있는지만 확인한다(소비 안 함,
+    /// 부작용 없음) - "티켓 검증이 필요한 상황인지"를 판단하는 용도. 로비→인게임
+    /// 정상 전환이면 IssueAndNotifyAsync가 미리 등록해뒀을 테니 있어야 하고, 같은
+    /// 서버로의 재접속이면 애초에 등록된 적이 없으니 없는 게 정상이다 - 그 경우까지
+    /// TryConsume을 강제하면 재접속을 막아버린다.</summary>
+    public bool HasPendingTicket(string playerId) => _pending.ContainsKey(playerId);
+
     // === 보내는 쪽 ===
 
     /// <summary>여러 명분의 티켓을 한 번에 발급하고, 상대 서버한테 통지까지 처리한다.

@@ -498,3 +498,127 @@
   종료)는 프로젝트 취향에 따라 갈리는 결정이라 TODO로 남겨두고 구현은 안 함.**
 - **결과**: 해결됨(접속 시도 중단까지). `Network/NetworkTimeouts.cs`(신규),
   `Network/Client/ClientInstance.cs`, `Network/Server/IngameServerInstance.cs`.
+
+---
+
+## 26. 전입 티켓 검증이 양방향 모두 사실상 죽은 코드였음
+
+- **발견**: "훔친 영구 토큰으로 목적지 서버에 먼저 도착 시도 - 전입 티켓 없이는
+  거부되는지" 테스트 중 - 전입 티켓을 일부러 위조해서 접속을 시도했는데 그대로
+  접속이 성공해버림(거부 로그가 전혀 안 뜸).
+- **원인**: 게임 에이전트의 `ConnectionApproval` 검증은 `session.OwnerServerType ==
+  Lobby`일 때만 티켓을 검사하는데, 매치가 확정되는 순간(`MatchNotificationDispatcher`)
+  로비가 클라 접속 전에 `OwnerServerType`을 이미 `Ingame`으로 미리 바꿔놔서, 실제
+  접속 시점엔 이 조건이 항상 거짓이 되어 검증 자체가 스킵되고 있었음. 정상 매칭도
+  예외 없이 마찬가지였음 - 반대 방향(`LobbyControlService.EnterLobby`의
+  `existing.OwnerServerType == Ingame` 조건)도 게임 에이전트가 리다이렉트 준비 시점에
+  `OwnerServerType`을 미리 `Lobby`로 바꿔서 똑같이 죽어있었음.
+- **예상 피해**: `KNOWN_ISSUES.md` #3에서 만들었던 "훔친 영구 토큰으로 먼저 도착"
+  방어가 양방향 모두 실질적으로 존재하지 않는 상태였음 - 토큰만 훔치면(또는
+  추측하면) 전입 티켓 없이도 목적지 서버에 진짜 클라보다 먼저 도착할 수 있었음.
+- **해결 방법**: `OwnerServerType`으로 "검증이 필요한 상황인지"를 간접 판단하던
+  방식을 버리고, `MainServerIntermediary`에 `HasPendingTicket(playerId)`(그 플레이어
+  앞으로 등록된 티켓이 있는지 부작용 없이 확인)를 추가해서 직접 판단하도록 양쪽 다
+  수정. 티켓이 등록돼 있으면(정상 전환) 반드시 통과해야 하고, 없으면(재접속) 검증
+  자체를 스킵 - `OwnerServerType`이 언제 바뀌는지와 완전히 무관해짐.
+- **결과**: 해결됨. `Shared.Common/Account/MainServerIntermediary.cs`,
+  `GameAgent/Services/GameServerHandler.cs`, `LobbyServer/Services/LobbyControlService.cs`.
+
+---
+
+## 27. 로그인 재진입 시 인게임 주소로 실패한 적 있는 예전 주소를 안내함
+
+- **발견**: 26번을 고쳐서 티켓 거부가 정상적으로 뜨게 된 뒤, 그 직후 자동으로 이어진
+  로그인 서버 재진입에서 클라가 `localhost:5200`(로비 주소)으로 NGO 접속을
+  시도하다가 10초 타임아웃으로 포기함 - 인게임 주소를 물어봤는데 로비 주소가 온 것.
+- **원인**: 재진입 시 인게임 목적지 주소로 `session.CurrentServer`를 썼는데, 이
+  필드는 실제 접속이 성공했을 때만(`HandlePlayerJoinedAsync`) 갱신됨. 이번 케이스처럼
+  접속이 (티켓 거부로) 한 번도 성공 못 한 채 재진입하면, `CurrentServer`엔 그 이전
+  단계(로비)의 값이 그대로 남아있어서 그걸 그대로 안내해버림.
+- **예상 피해**: 접속 실패(전입 티켓 거부뿐 아니라 어떤 이유로든 최초 접속이
+  한 번도 안 끝난 상태) 직후의 재진입이 전부 엉뚱한 주소로 안내됨.
+- **해결 방법**: `session.NextServer`(매치 확정 시점에 실제 NGO 주소로 채워지고,
+  접속 성공 시에만 비워짐)를 우선 사용하고, 비어있을 때만 `CurrentServer`로
+  폴백하도록 수정 - "아직 한 번도 못 도착함"과 "이전에 도착했었음"을 정확히 구분.
+- **결과**: 해결됨. `LoginServer/Services/LoginConnectionHandler.cs`.
+
+---
+
+## 28. `PlayerStatus.Matching`이 실질적으로 죽은 상태였고, 오히려 세션 리크를 만들고 있었음
+
+- **발견**: 26/27번을 고치는 대화 중, "매칭서버는 클라를 받는 곳이 아닌데 왜 별도
+  상태가 있나"는 의문에서 코드 전체를 점검하다가 발견.
+- **원인**: `PlayerStatus.Matching`은 `LobbyControlService.RequestMatch`에서 설정만
+  될 뿐, 코드베이스 어디에서도 이 값을 조건으로 검사하는 곳이 없었음. 오히려
+  `HandleStayConnectedEndedAsync`(로비 연결 끊김 시 세션 정리)의 조건이
+  `Status==Lobby`일 때만 정리하도록 되어 있어서, 매칭 대기 중(`Status==Matching`)
+  끊긴 세션은 정리 대상에서 빠짐. `RequestMatch`의 자체 연결 끊김 처리도 매칭
+  서버에서 빼달라고 통지만 할 뿐 세션 자체는 안 건드림 - 결과적으로 매칭 대기
+  중 끊기면 세션이 양쪽 어디서도 안 지워지고 영영 남는 리크였음.
+- **예상 피해**: 매칭 요청 중 연결이 끊기는 흔한 상황마다 세션 레지스트리에
+  고아 세션이 계속 쌓임.
+- **해결 방법**: `Matching` 상태 자체를 제거 - 매칭 대기 중에도 `Status`는 계속
+  `Lobby`로 유지. 그러면 `HandleStayConnectedEndedAsync`의 기존 정리 조건이 이
+  케이스도 자동으로 커버함.
+- **결과**: 해결됨. `Shared.Common/Redis/ISessionRegistry.cs`(enum),
+  `LobbyServer/Services/LobbyControlService.cs`.
+
+---
+
+## 29. 채팅 클라가 서버 Error 응답을 받으면 대기 중인 요청이 영원히 안 풀림
+
+- **발견**: "친구 삭제 직후 메시지" 보안 회귀 테스트 중 - 친구 삭제로 방이 사라진
+  채널에 `GetHistoryAsync`를 불렀더니, 서버가 `NOT_A_MEMBER` `Error`로 정상
+  응답했는데도 호출부가 그대로 멈춰서 테스트 로그가 중간에 끊김(최종 판정 줄이
+  아예 안 찍힘).
+- **원인**: `WebSocketChatChannel`의 `RequestChatAsync`/`GetMyRoomsAsync`/
+  `GetHistoryAsync`는 서버 응답을 `TaskCompletionSource`로 기다리는데, 수신 루프의
+  `Error` 케이스는 로그만 남기고 그 어떤 pending TCS도 풀어주지 않았음 - 서버가
+  정확히 그 요청에 대한 에러로 응답해도 호출자는 영원히 기다림.
+- **예상 피해**: 서버가 명시적으로 거부 응답을 준 정상적인 상황(권한 없음 등)에서도
+  클라가 멈춰버림 - 나중에 UI가 붙으면 그 화면 자체가 먹통이 됨.
+- **해결 방법**: `Error` 케이스에서 그 시점에 대기 중인 세 TCS(`_pendingRequestChat`/
+  `_pendingGetMyRooms`/`_pendingGetHistory`)를 전부 예외로 풀어주도록 수정 - 이 셋은
+  설계상 "한 번에 하나씩만" 진행되므로 실제로는 최대 하나만 대기 중이다.
+- **결과**: 해결됨. `Network/Client/WebSocketChatChannel.cs`.
+
+---
+
+## 30. Kestrel에 HTTP/2 keepalive가 없어서 클라 연결 끊김 감지 시간이 예측 불가능했음
+
+- **발견**: "매칭 대기 중 클라 연결 끊김" 테스트 중 - 서버가 아무것도 안 보내는
+  스트림(`StayConnected`, `RequestMatch`처럼 `Task.Delay(Timeout.Infinite,
+  context.CancellationToken)`으로 그냥 대기만 하는 것들)은 연결이 끊겨도 그
+  사실을 알아챌 방법이 전적으로 OS 수준 TCP 타임아웃에 의존하고 있었음 - 어떤
+  때는 61초, 어떤 때는 1분을 훌쩍 넘겨도 감지가 안 됨.
+- **원인**: `KestrelEndpointExtensions.ConfigureGameServerEndpoints`(모든 서버가
+  공용으로 쓰는 Kestrel 설정)에 HTTP/2 PING 기반 keepalive가 전혀 설정 안 돼있었음.
+- **예상 피해**: "클라가 끊기면 서버가 정리한다"에 의존하는 모든 로직(세션 정리,
+  매칭 이탈 통보 등)이 실제로는 몇 분씩 지연될 수 있었음 - 지금까지 이 문서의
+  다른 항목(#4, #24 등)에서 "연결 종료까지 61초 걸림" 같은 관찰이 반복됐던
+  근본 원인이기도 함.
+- **해결 방법**: `KeepAlivePingDelay=15초`, `KeepAlivePingTimeout=15초`를 명시적으로
+  설정 - 최대 30초 안에는 확실하게 끊긴 연결로 판정되게 함. 모든 서버가 공유하는
+  확장 메서드 한 곳만 고쳐서 전체 서버에 일괄 적용됨.
+- **테스트 방법론 메모**: 이 확인 과정에서, MPPM 뷰포트를 X 버튼으로 닫는 것과
+  Play 버튼으로 테스트 자체를 정지하는 것이 다르다는 것도 확인됨 - 뷰포트만
+  닫으면 그 밑의 프로세스/연결이 실제로는 안 죽고 계속 살아있는 것으로 보임.
+  "클라 연결이 실제로 끊기는" 상황을 재현하려면 Play를 정지해야 확실함.
+- **결과**: 해결됨. `Shared.Common/Hosting/KestrelEndpointExtensions.cs`.
+
+---
+
+## 31. 매칭 이탈 통보가 하드코딩된 가정에 의존했음 - `ConnectedClientInfo`로 개선
+
+- **발견**: 위 30번을 조사하는 과정에서, `HandleStayConnectedEndedAsync`(클라 연결
+  끊김 감지)가 매칭 서버에 이탈을 알려야 하는지 판단할 근거가 없어서 처음엔
+  "일단 무조건 알린다"는 식으로 임시 처리했었음 - 무해하지만 부정확함.
+- **개선**: 로비 연결(`LobbyConnectionRegistry`)이 관리하는 클라 정보에
+  `ConnectedClientInfo`(요청한 작업과 그 진행 상태를 담는 `Tasks` 딕셔너리)를
+  신설. `RequestMatch`가 대기 시작 시 `Tasks[Matching]=Pending`을 남기고 스트림이
+  끝날 때 지우며, `HandleStayConnectedEndedAsync`는 이제 이 상태를 실제로 확인해서
+  `Pending`일 때만 매칭 서버에 이탈을 통보함 - 하드코딩된 가정 대신 실제 상태
+  기반 판단으로 교체.
+- **결과**: 개선됨. `Shared.Common`이 아니라 `LobbyServer/Services`에 신설:
+  `ConnectedClientInfo.cs`(신규), `LobbyConnectionRegistry.cs`,
+  `LobbyControlService.cs`.

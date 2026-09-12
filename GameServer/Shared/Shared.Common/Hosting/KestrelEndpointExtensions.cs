@@ -1,3 +1,4 @@
+using System;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -29,6 +30,8 @@ public static class KestrelEndpointExtensions
 
         builder.WebHost.ConfigureKestrel(options =>
         {
+            ConfigureHttp2KeepAlive(options);
+
             options.ListenAnyIP(grpcPort, listenOptions =>
             {
                 listenOptions.Protocols = HttpProtocols.Http2;
@@ -55,6 +58,8 @@ public static class KestrelEndpointExtensions
 
         builder.WebHost.ConfigureKestrel(options =>
         {
+            ConfigureHttp2KeepAlive(options);
+
             options.ListenAnyIP(grpcPort, listenOptions =>
             {
                 listenOptions.Protocols = HttpProtocols.Http2;
@@ -63,5 +68,23 @@ public static class KestrelEndpointExtensions
         });
 
         return useTls;
+    }
+
+    /// <summary>
+    /// 서버-스트리밍 gRPC 호출(StayConnected, RequestMatch 등)은 서버가 클라에게 계속
+    /// 뭔가를 "쓰려고 시도"할 때만 끊긴 연결을 알아챈다 - 조용히 대기만 하는 스트림은
+    /// (예: Task.Delay(Timeout.Infinite, context.CancellationToken)) 그 CancellationToken이
+    /// 언제 취소되는지 전적으로 OS 수준 TCP 타임아웃에 의존하게 되는데, 이게 명시적으로
+    /// 설정 안 하면 몇 분이 걸릴지 예측이 안 된다(실제로 겪음 - 어떤 때는 1분,
+    /// 어떤 때는 그보다 훨씬 오래 걸림, KNOWN_ISSUES.md 참고). HTTP/2 PING 기반
+    /// keepalive를 명시적으로 켜서, 일정 시간 안에 응답이 없으면 확실하게 연결을 끊긴
+    /// 것으로 판정하게 만든다.
+    /// </summary>
+    private static void ConfigureHttp2KeepAlive(KestrelServerOptions options)
+    {
+        // 이 시간 동안 아무 통신도 없으면 PING을 보낸다.
+        options.Limits.Http2.KeepAlivePingDelay = TimeSpan.FromSeconds(15);
+        // PING을 보낸 뒤 이 시간 안에 응답이 없으면 연결을 끊긴 것으로 판정한다.
+        options.Limits.Http2.KeepAlivePingTimeout = TimeSpan.FromSeconds(15);
     }
 }

@@ -155,9 +155,15 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         // 인게임에서 돌아오는 전환이면 일회용 임시 티켓도 검증한다 - 훔친 영구 토큰으로
         // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 로그인 서버발
         // 최초 진입 등 다른 경로는 애초에 이 로비한테 미리 등록된 티켓이 없으므로
-        // 대상이 아니다 - existing.OwnerServerType으로 구분한다(단순히 필드를 비워서
-        // 우회할 수 없음 - Ingame 소유였으면 반드시 TryConsume을 통과해야 함).
-        if (existing != null && existing.OwnerServerType == GameServer.Common.ServerType.Ingame)
+        // 대상이 아니다 - HasPendingTicket으로 구분한다.
+        //
+        // 원래는 existing.OwnerServerType == Ingame으로 구분했었는데, 게임 에이전트의
+        // CloseRoomAndRedirectAsync가 리다이렉트 준비 시점에 OwnerServerType을 이미
+        // Lobby로 미리 바꿔버려서, 클라가 실제로 도착할 땐 이 조건이 항상 거짓이 되어
+        // 티켓 검증 자체가 통째로 스킵되고 있었다 - 게임 에이전트 쪽(GameServerHandler)
+        // 승인 로직에서 같은 패턴의 버그를 먼저 발견해서 고치면서 여기도 같이 확인함
+        // (KNOWN_ISSUES.md 참고).
+        if (_mainServerIntermediary.HasPendingTicket(playerId))
         {
             if (!_mainServerIntermediary.TryConsume(playerId, request.TransferTicket))
             {
@@ -330,6 +336,19 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
                 await _sessionRegistry.RemoveAsync(playerId);
                 PublishSessionInvalidated(playerId);
                 _logger.LogInformation("StayConnected 스트림 종료 - 세션 정리: {PlayerId}", playerId);
+
+                // 매칭 중이었는지는 이제 하드코딩된 가정이 아니라 실제 상태로 판단한다 -
+                // RequestMatch가 대기 시작 시점에 Tasks[Matching]=Pending을 남겨두고,
+                // 결과가 나오든 끊기든 자기 스트림이 끝날 때 지운다. StayConnected 쪽
+                // 감지(이 메서드)가 RequestMatch 자신의 감지보다 먼저 도착하는 경우가
+                // 있어서(실제로 확인됨 - RequestMatch 쪽 감지가 안 되거나 훨씬 느렸음,
+                // KNOWN_ISSUES.md 참고) 여기서도 확인해서 필요하면 먼저 정리해준다.
+                if (_connectionRegistry.TryGetClientInfo(playerId, out var clientInfo) &&
+                    clientInfo.Tasks.TryGetValue(RequestedClientTask.Matching, out var matchingState) &&
+                    matchingState == RequestedClientTaskState.Pending)
+                {
+                    await RequestLeaveMatchAsync(playerId);
+                }
             }
         }
         catch (Exception ex)
@@ -368,8 +387,9 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             return;
         }
 
-        session.Status = PlayerStatus.Matching;
-        await _sessionRegistry.UpdateAsync(playerId, session);
+        // Status는 계속 Lobby로 둔다 - 예전엔 여기서 Matching으로 바꿨는데, 그 상태를
+        // 검사하는 곳이 없었고 오히려 매칭 대기 중 끊긴 세션이 정리 안 되는 리크만
+        // 만들었다(위 enum 정의 주석, KNOWN_ISSUES.md 참고).
 
         // 매칭 서버에 JoinMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김)
         if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
@@ -395,6 +415,14 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
             Queued = new MatchQueued { QueuePosition = 1, EstimatedWaitMs = 0 },
         });
 
+        // 지금부터 매칭 대기 중이라는 걸 기록해둔다 - StayConnected 연결이 끊겼을 때
+        // "정말 매칭 중이었는지"를 이걸로 정확히 판단한다(예전엔 무조건 LeaveMatch를
+        // 불렀음 - 무해하지만 부정확했다, KNOWN_ISSUES.md 참고).
+        if (_connectionRegistry.TryGetClientInfo(playerId, out var clientInfo))
+        {
+            clientInfo.Tasks[RequestedClientTask.Matching] = RequestedClientTaskState.Pending;
+        }
+
         // 디스패처에 등록 후 결과 대기 (결과는 MatchNotificationDispatcher가 전달)
         var cts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
         _notificationDispatcher.Register(playerId, responseStream, cts);
@@ -408,11 +436,22 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             _notificationDispatcher.TryUnregister(playerId, out _);
 
+            // 이 스트림이 어떻게 끝났든(매치 확정/취소/클라 연결 끊김) 더 이상 "대기 중"은
+            // 아니므로 지운다. StayConnected 쪽이 이미 먼저 감지해서 LeaveMatch까지
+            // 부른 뒤일 수도 있는데, 그래도 여기서 지우는 건 안전하다(중복 호출 방지 목적).
+            if (_connectionRegistry.TryGetClientInfo(playerId, out var info))
+            {
+                info.Tasks.TryRemove(RequestedClientTask.Matching, out _);
+            }
+
             // context.CancellationToken이 취소됐다는 건 클라 연결 자체가 끊겼다는 뜻이다
             // (매치 결과가 도착해서 취소된 거면 MatchNotificationDispatcher가 자기 cts만
             // 따로 취소하지, 클라의 링크된 토큰까지 취소시키진 않는다).
             // 이 경우에만 매칭 서버에서도 빼달라고 요청한다 - 이미 매치 결과로 빠진 경우
             // 또 부르면 매칭 서버 쪽에서 "대기 중이 아닌 플레이어" 경고만 찍히고 실익이 없다.
+            // (StayConnected 쪽 감지가 이미 먼저 처리했을 수도 있어 중복될 수 있는데,
+            // LeaveMatch는 중복 호출에 안전하다 - 두 경로 중 뭐가 먼저 감지하든 상관없게
+            // 방어적으로 둘 다 남겨둔다.)
             if (context.CancellationToken.IsCancellationRequested)
             {
                 _logger.LogInformation("매칭 중 클라 접속 끊김 - LeaveMatch 요청: {PlayerId}", playerId);

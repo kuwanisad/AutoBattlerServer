@@ -84,8 +84,12 @@ public interface ISessionRegistry
 /// <summary>플레이어 현재 상태.</summary>
 public enum PlayerStatus
 {
-    Lobby,      // 로비 서버에 있음
-    Matching,   // 매칭 대기 중
+    // 로비 서버에 있음. 매칭 대기 중(RequestMatch 응답 기다리는 중)도 이 상태
+    // 그대로 유지한다 - 예전엔 별도 Matching 상태가 있었는데, 그 상태를 실제로
+    // 검사하는 곳이 코드베이스 어디에도 없었고, 오히려 매칭 대기 중 끊긴 세션이
+    // HandleStayConnectedEndedAsync의 정리 조건(Status==Lobby)에 안 걸려서 영영
+    // 안 지워지는 리크만 만들고 있었다 - 그래서 제거함(KNOWN_ISSUES.md 참고).
+    Lobby,
     Moving,     // 서버 이동 중 (취약점 방지용 상태)
     Ingame,     // 인게임 서버에 있음
 }

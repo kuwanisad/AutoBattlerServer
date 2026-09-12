@@ -533,13 +533,22 @@ public sealed class GameServerHandler
             response.Reason = "INVALID_TOKEN";
             _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
         }
-        else if (session.OwnerServerType == GameServer.Common.ServerType.Lobby &&
+        else if (_mainServerIntermediary.HasPendingTicket(request.PlayerId) &&
                  !_mainServerIntermediary.TryConsume(request.PlayerId, request.TransferTicket))
         {
-            // 로비에서 오는 전환이면 일회용 임시 티켓도 검증한다 - 훔친 영구 토큰으로
-            // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 재접속(이미
-            // 이 게임 에이전트가 소유자였던 경우)은 로비가 애초에 이 게임 에이전트한테
-            // 티켓을 등록해준 적이 없으므로 대상이 아니다 - OwnerServerType으로 구분한다.
+            // 이 플레이어 앞으로 등록된 티켓이 있는데(=로비→인게임 정상 전환) 그걸
+            // 소비 못 했다(없거나 틀리거나 만료) - 훔친 영구 토큰으로 진짜 클라보다
+            // 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 재접속(이미 이 게임
+            // 에이전트가 소유자였던 경우)은 애초에 티켓이 등록된 적이 없으므로
+            // HasPendingTicket이 false라 이 분기 자체를 안 탄다 - 재접속을 막지
+            // 않는다.
+            //
+            // 원래는 session.OwnerServerType == Lobby로 이 둘을 구분했었는데, 매치
+            // 확정 시점에 로비가 OwnerServerType을 이미 Ingame으로 미리 바꿔버려서
+            // (재진입 로직이 필요로 함) 이 조건이 실제 접속 시점엔 항상 거짓이 되어
+            // 티켓 검증 자체가 통째로 스킵되고 있었다 - 정상 매칭도 예외 없이.
+            // HasPendingTicket으로 바꿔서 OwnerServerType과 완전히 독립적으로
+            // 판단하게 고쳤다(재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
             response.Approved = false;
             response.Reason = "INVALID_TRANSFER_TICKET";
             _logger.LogWarning("접속 거부 - 전입 티켓 불일치/만료: PlayerId={PlayerId}", request.PlayerId);

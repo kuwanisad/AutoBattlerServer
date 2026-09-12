@@ -24,18 +24,32 @@ public sealed class LobbyConnectionRegistry
     /// </summary>
     internal readonly object SyncRoot = new();
 
-    private readonly ConcurrentDictionary<string, Channel<global::LobbyServer.StayConnectedEvent>> _channels = new();
+    private readonly ConcurrentDictionary<string, ConnectedClientInfo> _clients = new();
 
     public void Register(string playerId, Channel<global::LobbyServer.StayConnectedEvent> channel) =>
-        _channels[playerId] = channel;
+        _clients[playerId] = new ConnectedClientInfo(channel);
 
-    public void Unregister(string playerId) => _channels.TryRemove(playerId, out _);
+    public void Unregister(string playerId) => _clients.TryRemove(playerId, out _);
 
-    public bool TryGet(string playerId, out Channel<global::LobbyServer.StayConnectedEvent> channel) =>
-        _channels.TryGetValue(playerId, out channel!);
+    public bool TryGet(string playerId, out Channel<global::LobbyServer.StayConnectedEvent> channel)
+    {
+        if (_clients.TryGetValue(playerId, out var info))
+        {
+            channel = info.Channel;
+            return true;
+        }
+
+        channel = null!;
+        return false;
+    }
+
+    /// <summary>이 클라가 지금 요청해둔 작업들(RequestedClientTask)의 진행 상태를
+    /// 담은 객체를 가져온다 - 연결 끊김 시 "지금 뭘 정리해야 하는지" 판단할 때 쓴다.</summary>
+    public bool TryGetClientInfo(string playerId, out ConnectedClientInfo info) =>
+        _clients.TryGetValue(playerId, out info!);
 
     /// <summary>지금 접속 중인 전체 playerId 스냅샷. 호출부가 SyncRoot를 이미 잡고 있는
     /// 상태에서만 호출해야 한다(그래야 스냅샷 뜨는 동안 새 접속이 못 끼어듦) - 이
     /// 메서드 자체는 락을 안 건다.</summary>
-    public IReadOnlyList<string> SnapshotPlayerIdsUnderLock() => _channels.Keys.ToList();
+    public IReadOnlyList<string> SnapshotPlayerIdsUnderLock() => _clients.Keys.ToList();
 }
