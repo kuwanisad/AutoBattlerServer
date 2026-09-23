@@ -169,7 +169,7 @@ public sealed class GameServerHandler
     /// 방을 닫고 그 안에 접속 중이던 클라들을 로비로 리다이렉트한다. 이유(취소든 정상 종료든)와
     /// 무관하게 "방을 닫고 다 같이 로비로 보낸다"는 메커니즘 자체는 동일해서 하나로 통일했다 -
     /// 매칭 서버의 CancelRoom 요청(IngameMatchService), 게임 서버 자체 방-채움 타임아웃
-    /// (RoomTimeout), 매치 정상 종료(MatchResult) 전부 이 메서드를 거친다.
+    /// (RoomTimeout), 게임 정상 종료(GameResult) 전부 이 메서드를 거친다.
     /// 접속 중인 클라를 파악해서, 있으면 매칭 서버에 로비 주소를 물어 세션 권한을 이전한 뒤
     /// 리다이렉트 정보와 함께 게임 서버에 CloseRoom을 보낸다. 접속 중인 클라가 없으면(또는
     /// 리다이렉트할 로비를 못 찾으면) 그냥 방 제거만 요청한다.
@@ -353,8 +353,8 @@ public sealed class GameServerHandler
                         HandleRoomOpened(message.RoomOpened);
                         break;
 
-                    case GameServerMessage.PayloadOneofCase.MatchResult:
-                        await HandleMatchResultAsync(message.MatchResult);
+                    case GameServerMessage.PayloadOneofCase.GameResult:
+                        await HandleGameResultAsync(message.GameResult);
                         break;
 
                     case GameServerMessage.PayloadOneofCase.PlayerJoined:
@@ -487,16 +487,16 @@ public sealed class GameServerHandler
             roomOpened.RoomId);
     }
 
-    private async Task HandleMatchResultAsync(MatchResult result)
+    private async Task HandleGameResultAsync(GameResult result)
     {
-        _logger.LogInformation("매치 결과 수신: MatchId={MatchId} ({Count}명)", result.MatchId, result.Players.Count);
+        _logger.LogInformation("게임 결과 수신: GameId={GameId} ({Count}명)", result.GameId, result.Players.Count);
 
         // 승패 판정/점수/보상 등 실제 게임 결과는 인게임 서버(진짜 권위)가 이미 정해서 보낸
         // 것이다 - 게임 에이전트는 그 판단에 관여하지 않고, "정상적으로 끝났다"는 사실만
         // 받아서 로비 복귀 처리만 담당한다("에이전트"라는 이름 그대로).
-        // TODO: 매치 결과(승패, 점수 등)를 Kafka에 발행해 기록/보상 처리하는 부분은 미구현.
+        // TODO: 게임 결과(승패, 점수 등)를 Kafka에 발행해 기록/보상 처리하는 부분은 미구현.
         //       result.Players에 담긴 순위/승패/획득 점수는 지금 아무 데도 안 쓰인다.
-        await CloseRoomAndRedirectAsync(result.MatchId, "매치 정상 종료");
+        await CloseRoomAndRedirectAsync(result.GameId, "게임 정상 종료");
     }
 
     private async Task HandleApprovalRequestAsync(ApprovalRequest request, GameServerInfo serverInfo)

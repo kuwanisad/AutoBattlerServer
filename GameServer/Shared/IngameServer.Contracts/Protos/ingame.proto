@@ -59,7 +59,7 @@ message GameServerMessage {
     GameServerStatus status = 2;                    // 부하/수용량 상태 보고
     ServerReady ready = 3;                          // 게임 서버 준비 완료
     RoomOpened room_opened = 4;                     // 방 열기 완료 확인
-    MatchResult match_result = 5;                   // 매치 결과
+    GameResult game_result = 5;                     // 게임 결과
     PlayerJoined player_joined = 6;                 // 플레이어 접속
     PlayerLeft player_left = 7;                     // 플레이어 퇴장
     ApprovalRequest approval_request = 8;           // ConnectionApproval 검증 요청
@@ -96,14 +96,14 @@ message RoomOpened {
   string error_message = 3;  // success = false인 경우 원인
 }
 
-message MatchResult {
-  string match_id = 1;
-  repeated PlayerMatchResult players = 2;
+message GameResult {
+  string game_id = 1;
+  repeated PlayerGameResult players = 2;
   int64 started_at_unix_ms = 3;
   int64 finished_at_unix_ms = 4;
 }
 
-message PlayerMatchResult {
+message PlayerGameResult {
   string player_id = 1;
   int32 rank = 2;
   bool is_winner = 3;
