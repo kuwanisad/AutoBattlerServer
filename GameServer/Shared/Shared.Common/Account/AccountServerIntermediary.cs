@@ -67,6 +67,21 @@ public abstract class AccountServerIntermediary
         return await client.GetFriendsAsync(new AccountServer.GetFriendsRequest { PlayerId = playerId });
     }
 
+    /// <summary>여러 playerId의 닉네임을 한 번에 조회한다 - 로그인 서버(내 닉네임
+    /// 하나만 필요해도 이 RPC를 그대로 재사용)와 게임 에이전트(방 로스터
+    /// 전체를 한 번에 조회) 둘 다 이 메서드를 쓴다.</summary>
+    public async Task<AccountServer.GetNicknamesResponse> GetNicknamesAsync(
+        IEnumerable<string> playerIds, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(AccountServerAddress)) return new AccountServer.GetNicknamesResponse();
+
+        using var channel = GrpcChannelFactory.Create(AccountServerAddress);
+        var client = new AccountServer.AccountControl.AccountControlClient(channel);
+        var request = new AccountServer.GetNicknamesRequest();
+        request.PlayerIds.AddRange(playerIds);
+        return await client.GetNicknamesAsync(request, cancellationToken: cancellationToken);
+    }
+
     public async Task<AccountServer.AddFriendResponse> AddFriendAsync(string playerId, string friendPlayerId)
     {
         if (string.IsNullOrEmpty(AccountServerAddress))

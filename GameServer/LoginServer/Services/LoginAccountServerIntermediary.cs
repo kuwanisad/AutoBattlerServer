@@ -37,7 +37,7 @@ public sealed class LoginAccountServerIntermediary : AccountServerIntermediary
     }
 
     public async Task<AccountServer.CreateAccountResponse> CreateAccountAsync(
-        string accountId, string password, CancellationToken cancellationToken = default)
+        string accountId, string password, string nickname, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(AccountServerAddress))
         {
@@ -54,6 +54,7 @@ public sealed class LoginAccountServerIntermediary : AccountServerIntermediary
         {
             AccountId = accountId,
             Password = password,
+            Nickname = nickname,
         }, cancellationToken: cancellationToken);
     }
 }

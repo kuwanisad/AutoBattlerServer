@@ -16,6 +16,9 @@ public interface IAccountRepository
     /// <summary>이미 발급된 playerId인지 확인한다 (GUID 충돌 방어용).</summary>
     Task<bool> PlayerIdExistsAsync(string playerId);
 
+    /// <summary>이미 쓰이고 있는 닉네임인지 확인한다 - 계정 생성 시 중복 거부용.</summary>
+    Task<bool> NicknameExistsAsync(string nickname);
+
     /// <summary>playerId로 친구 목록을 조회한다. 계정이 없으면 빈 목록.</summary>
     Task<IReadOnlyCollection<string>> GetFriendsAsync(string playerId);
 
@@ -25,6 +28,11 @@ public interface IAccountRepository
     /// <summary>서로를 친구 목록에서 제거한다(대칭). 원래 친구가 아니었어도 성공으로 본다
     /// (멱등 - 이미 없는 걸 지우는 건 에러가 아니라 목표 상태에 이미 도달한 것).</summary>
     Task<bool> RemoveFriendAsync(string playerId, string friendPlayerId);
+
+    /// <summary>여러 playerId의 닉네임을 한 번에 조회한다 - 계정이 없는 playerId는
+    /// 결과에서 그냥 빠진다(별도 에러 처리 불필요, 호출부가 없는 항목으로
+    /// 판단). 로스터 전체를 한 번에 조회하는 게 주 사용처라 배치로 뒀다.</summary>
+    Task<IReadOnlyDictionary<string, string>> GetNicknamesAsync(IEnumerable<string> playerIds);
 }
 
 /// <summary>계정 하나의 정보. 로그인 정보(ID/비번) 외에 나중에 다른 계정 속성이 늘어날 수 있어서
@@ -36,6 +44,10 @@ public sealed class AccountRecord
     public string PasswordHash { get; set; } = string.Empty;
     public string PlayerId { get; set; } = string.Empty;
     public long CreatedAtUnixMs { get; set; }
+
+    /// <summary>계정 생성 시에만 입력받고 그 뒤로는 안 바뀐다(신규 요구사항이
+    /// 생기면 별도 RPC로 처리 - 지금은 변경 경로 자체가 없음).</summary>
+    public string Nickname { get; set; } = string.Empty;
 
     /// <summary>친구의 playerId 목록. HashSet 하나로 충분하다는 판단 - 친구 관계 자체에
     /// 별도 메타데이터(추가 시각 등)가 필요해지면 그때 확장.</summary>

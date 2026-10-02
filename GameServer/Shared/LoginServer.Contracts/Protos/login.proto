@@ -22,12 +22,25 @@ message ClientToLoginMessage {
   oneof payload {
     Credentials credentials = 1;
     ReconnectRequest reconnect = 2;
+    CreateAccountRequest create_account = 3;
   }
 }
 
 message Credentials {
   string account_id = 1;
   string password = 2;
+}
+
+// 클라가 명시적으로 "계정을 새로 만들어달라"고 요청할 때 쓴다(Credentials와 분리 -
+// 예전엔 Credentials로 로그인 시도했다가 계정이 없으면 같은 정보로 자동 생성해버렸는데,
+// 그러면 닉네임을 입력받을 지점이 없었다). 계정 ID/닉네임이 이미 있으면 거부된다
+// (AccountServer.CreateAccount가 둘 다 검사). 성공하면 그 즉시 로그인 성공으로
+// 간주하고 Credentials 로그인과 완전히 같은 절차(세션 클레임 → 로비 이관 → 리다이렉트)를
+// 탄다.
+message CreateAccountRequest {
+  string account_id = 1;
+  string password = 2;
+  string nickname = 3;
 }
 
 // 갈 곳을 잃은 클라가 자격증명 재입력 없이 재진입을 시도할 때 쓴다(KNOWN_ISSUES.md
@@ -69,9 +82,18 @@ message LoginRedirect {
   // vs NGO ConnectionApproval)를 밟을 수 있게 함. 별도 enum 대신 common.proto의
   // ServerType을 그대로 재사용 - 의미가 완전히 같은 걸 새로 안 만듦.
   ServerType destination_server_type = 5;
+
+  // 최초 로그인(Credentials/CreateAccountRequest) 응답에서만 채워진다 - 계정 생성
+  // 시에만 입력받고 그 뒤로 안 바뀌는 값이라(account.proto 참고), 클라가 이 한 번을
+  // 받으면 재접속(ReconnectRequest) 응답에서는 다시 안 줘도 된다(클라가 이미 들고
+  // 있으므로) - 그래서 HandleReconnectAsync 쪽 LoginRedirect엔 이 필드를 안 채운다.
+  string nickname = 6;
 }
 
-// reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치, 생성도 실패),
+// reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치 또는 그 계정 자체가 없음 -
+// Credentials 로그인은 더 이상 자동으로 계정을 만들지 않는다, CreateAccountRequest를
+// 따로 보내야 함), "ACCOUNT_CREATION_FAILED"(CreateAccountRequest인데 ID/닉네임
+// 중복 등으로 생성 실패 - 정확한 사유는 서버 로그에만 남고 클라에는 안 내려줌),
 // "SESSION_CONFLICT"(이미 다른 서버가 이 플레이어를 살아서 소유 중),
 // "NO_LOBBY_AVAILABLE"(매칭 서버가 갈 수 있는 로비를 못 찾음 - "서버가 가득 찼습니다"),
 // "TIMEOUT"(제한 시간 안에 계정 정보 미제출), "INTERNAL_ERROR"(그 외 내부 오류),

@@ -22,6 +22,14 @@ service AccountControl {
   rpc AddFriend(AddFriendRequest) returns (AddFriendResponse);
   rpc RemoveFriend(RemoveFriendRequest) returns (RemoveFriendResponse);
 
+  // 닉네임은 계정 생성 시에만 입력받는다(CreateAccountRequest.nickname) - 그 뒤로는
+  // 안 바뀐다는 전제. 로그인 서버가 로그인 성공 응답에 실어서 클라에게 한 번만
+  // 주면, 클라는 재접속 여부와 무관하게 자기 닉네임을 계속 들고 있으면 된다.
+  // 다른 플레이어(들)의 닉네임이 필요한 쪽(인게임 서버 등)은 이 RPC로 조회한다 -
+  // 한 번에 여러 명을 조회할 수 있게 배치로 뒀다(로스터 전체를 한 번에 조회하는
+  // 용도가 주 사용처라서).
+  rpc GetNicknames(GetNicknamesRequest) returns (GetNicknamesResponse);
+
   // 우편함 - 하위 서버가 처리한 결과(보상 지급 등)를 영속 기록하고, 클라가 나중에
   // 조회/수령한다. "수령"이 단순 열람이 아니라 보상 지급이 같이 일어나는 경제적
   // 트랜잭션이라, 채팅 서버가 아니라 계정 데이터를 원자적으로 다루는 여기서 담당한다.
@@ -43,6 +51,7 @@ message VerifyAccountResponse {
 message CreateAccountRequest {
   string account_id = 1;
   string password = 2;
+  string nickname = 3;   // 계정 생성 시에만 입력 - 이후 변경 경로는 없음(신규 요구사항 생기면 별도 RPC로)
 }
 
 message CreateAccountResponse {
@@ -57,6 +66,16 @@ message GetFriendsRequest {
 
 message GetFriendsResponse {
   repeated string friend_player_ids = 1;
+}
+
+message GetNicknamesRequest {
+  repeated string player_ids = 1;
+}
+
+message GetNicknamesResponse {
+  // playerId → 닉네임. 존재하지 않는 playerId는 그냥 빠진다(호출부가 조회
+  // 결과에 없는 항목을 "없음"으로 처리하면 됨 - 별도 에러 코드 불필요).
+  map<string, string> nicknames = 1;
 }
 
 message AddFriendRequest {

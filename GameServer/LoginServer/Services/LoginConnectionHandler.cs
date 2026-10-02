@@ -88,9 +88,35 @@ internal sealed class LoginConnectionHandler
             return;
         }
 
+        if (requestStream.Current.PayloadCase == ClientToLoginMessage.PayloadOneofCase.CreateAccount)
+        {
+            var createRequest = requestStream.Current.CreateAccount;
+
+            if (string.IsNullOrEmpty(createRequest.AccountId) || string.IsNullOrEmpty(createRequest.Password) ||
+                string.IsNullOrEmpty(createRequest.Nickname))
+            {
+                await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+                return;
+            }
+
+            // 3. 계정 서버에 생성 요청(ID/닉네임 중복 검사 포함)
+            var newPlayerId = await ResolveNewAccountAsync(createRequest, cancellationToken);
+            if (newPlayerId == null)
+            {
+                await TrySendRejectedAsync(responseStream, "ACCOUNT_CREATION_FAILED", cancellationToken);
+                return;
+            }
+
+            // 생성 성공 = 그 즉시 로그인 성공으로 간주 - Credentials 로그인과
+            // 완전히 같은 절차(4~7단계)를 그대로 탄다. 닉네임은 이미 요청 자체에
+            // 있으니 계정 서버에 다시 물어볼 필요 없음.
+            await CompleteLoginAsync(newPlayerId, createRequest.Nickname, responseStream, cancellationToken);
+            return;
+        }
+
         if (requestStream.Current.PayloadCase != ClientToLoginMessage.PayloadOneofCase.Credentials)
         {
-            _logger.LogWarning("첫 메시지가 Credentials/Reconnect가 아님: {Peer}", context.Peer);
+            _logger.LogWarning("첫 메시지가 Credentials/Reconnect/CreateAccount가 아님: {Peer}", context.Peer);
             await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
             return;
         }
@@ -103,7 +129,7 @@ internal sealed class LoginConnectionHandler
             return;
         }
 
-        // 3. 계정 서버에 대조/생성 요청
+        // 3. 계정 서버에 대조 요청(더 이상 자동 생성 안 함 - ResolvePlayerIdAsync 주석 참고)
         var playerId = await ResolvePlayerIdAsync(credentials, cancellationToken);
         if (playerId == null)
         {
@@ -111,6 +137,23 @@ internal sealed class LoginConnectionHandler
             return;
         }
 
+        var nickname = await ResolveNicknameAsync(playerId, cancellationToken);
+        await CompleteLoginAsync(playerId, nickname, responseStream, cancellationToken);
+    }
+
+    /// <summary>4~7단계(세션 레지스트리 관리 권한 획득 → 매칭 서버에 로비 주소
+    /// 요청 → 로비 서버로 소유권 이관 → 클라에 리다이렉트 응답) - 기존
+    /// 계정으로 로그인했든(Credentials) 방금 막 계정을 생성했든(CreateAccountRequest)
+    /// 이 지점부터는 완전히 같은 절차다(둘 다 "이제부터 로그인된 상태"이므로).
+    /// nickname은 호출부가 미리 알아내서 넘긴다 - CreateAccountRequest 쪽은
+    /// 요청 자체에 이미 있고(ResolveNewAccountAsync), Credentials 쪽은 계정
+    /// 서버에 따로 물어봐야 한다(ResolveNicknameAsync).</summary>
+    private async Task CompleteLoginAsync(
+        string playerId,
+        string nickname,
+        IServerStreamWriter<LoginToClientMessage> responseStream,
+        CancellationToken cancellationToken)
+    {
         // 4. 세션 레지스트리 관리 권한 획득 시도 (자기 자신으로 클레임)
         // 여기서 초기 토큰도 같이 발급해서 세션에 심어둔다 - 클라가 이후 로비에서
         // EnterLobby를 부를 때 이 토큰을 제출하면, 로비의 TokenVerification이 세션의
@@ -172,6 +215,7 @@ internal sealed class LoginConnectionHandler
                 Token = initialToken,
                 ChatAddress = _masterConnection.ChatServerAddress,
                 DestinationServerType = GameServer.Common.ServerType.Lobby,
+                Nickname = nickname,
             },
         }, cancellationToken);
 
@@ -314,7 +358,11 @@ internal sealed class LoginConnectionHandler
         });
     }
 
-    /// <summary>계정 서버에 검증을 요청하고, 없으면 같은 정보로 생성까지 시도해서 playerId를 얻는다.</summary>
+    /// <summary>계정 서버에 검증만 요청한다 - 계정이 없으면 더 이상 자동으로
+    /// 만들지 않는다(예전엔 여기서 같은 정보로 즉시 생성했었는데, 그러면
+    /// 닉네임을 입력받을 지점이 없었다 - 계정 생성은 이제
+    /// CreateAccountRequest로 명시적으로 요청해야 한다, ResolveNewAccountAsync
+    /// 참고).</summary>
     private async Task<string?> ResolvePlayerIdAsync(Credentials credentials, CancellationToken cancellationToken)
     {
         try
@@ -322,25 +370,53 @@ internal sealed class LoginConnectionHandler
             var verifyResponse = await _accountServer.VerifyAccountAsync(
                 credentials.AccountId, credentials.Password, cancellationToken);
 
-            if (verifyResponse.Found)
-            {
-                return verifyResponse.PlayerId;
-            }
+            return verifyResponse.Found ? verifyResponse.PlayerId : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "계정 서버 호출 실패");
+            return null;
+        }
+    }
 
-            // 계정이 없으면 같은 정보로 새로 만든다 (별도 "계정 생성 확인" 단계 없이 -
-            // 지금은 임시로 간단하게 처리).
+    /// <summary>Credentials 로그인 경로에서만 쓰인다 - CreateAccountRequest
+    /// 경로는 요청 자체에 이미 닉네임이 있어서 이 호출이 필요 없다. 계정
+    /// 서버 호출이 실패해도 로그인 자체를 막지는 않는다(빈 문자열로 계속
+    /// 진행) - 닉네임 표시 실패가 로그인 실패로 번질 이유는 없음.</summary>
+    private async Task<string> ResolveNicknameAsync(string playerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _accountServer.GetNicknamesAsync(new[] { playerId }, cancellationToken);
+            return response.Nicknames.TryGetValue(playerId, out var nickname) ? nickname : string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "닉네임 조회 실패: {PlayerId}", playerId);
+            return string.Empty;
+        }
+    }
+
+    /// <summary>CreateAccountRequest를 계정 서버로 그대로 전달한다. ID/닉네임
+    /// 중복 검사는 전부 계정 서버(AccountControlService.CreateAccount)가
+    /// 한다 - 여기는 그 결과를 로그인 흐름에 맞게 옮기기만 한다.</summary>
+    private async Task<string?> ResolveNewAccountAsync(
+        CreateAccountRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
             var createResponse = await _accountServer.CreateAccountAsync(
-                credentials.AccountId, credentials.Password, cancellationToken);
+                request.AccountId, request.Password, request.Nickname, cancellationToken);
 
             if (createResponse.Success)
             {
                 _logger.LogInformation("신규 계정 생성: {AccountId} → {PlayerId}",
-                    credentials.AccountId, createResponse.PlayerId);
+                    request.AccountId, createResponse.PlayerId);
                 return createResponse.PlayerId;
             }
 
             _logger.LogInformation("계정 생성 실패: {AccountId} - {Error}",
-                credentials.AccountId, createResponse.ErrorMessage);
+                request.AccountId, createResponse.ErrorMessage);
             return null;
         }
         catch (Exception ex)
@@ -350,6 +426,9 @@ internal sealed class LoginConnectionHandler
         }
     }
 
+    /// <summary>매칭 서버에 지금 갈 수 있는 로비 서버 주소를 요청한다. 로비가
+    /// 여럿이면 매칭 서버가 알아서 하나를 골라준다(부하 분산 등 - 여기는
+    /// 그 선택 기준을 몰라도 됨).</summary>
     private async Task<(string ServerId, string Address)?> RequestLobbyAddressAsync(CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))

@@ -6,6 +6,57 @@
 
 ---
 
+- **`AccountControlService.CreateAccount`에 닉네임 길이 제한이 없음** -
+  클라 쪽(`AutoChessPlayerState.Nickname`)이 `FixedString32Bytes`(UTF8
+  최대 29바이트)로 리플리케이트되기 때문에, 그보다 긴 닉네임으로 가입하면
+  화면에서 잘려서 표시된다. 계정 생성 시점에 길이 검증(예: 29바이트
+  이하)을 추가하는 게 맞음(`Unity/TODO.md`의 관련 항목 참고).
+
+- **게임 결과(승패/점수) → 계정 동기화가 아예 미구현** -
+  `GameAgent/Services/GameServerHandler.cs.HandleGameResultAsync`는 인게임
+  서버가 보낸 `GameResult`(순위/승패/획득 점수)를 받고도 로비 복귀 처리만
+  하고, 그 결과를 계정 서버에 반영하는 코드가 없다(기존 TODO 주석:
+  "Kafka에 발행해 기록/보상 처리하는 부분은 미구현" - `result.Players`가
+  지금 아무 데도 안 쓰임). 이 동기화 자체를 만들 때, 그 사이 계정이
+  삭제된 경우(삭제 요청과 동기화 요청이 겹치는 레이스 - 계정 삭제
+  관련 사고실험에서 나온 논의)를 계정 서버가 조용히 무시하도록
+  처리해야 함 - 지금은 이 동기화도, 그 무시 처리도 둘 다 없음.
+
+- **닉네임 파이프라인 - 전 구간 완료** (계정 서버 → 로그인 서버 → 인게임
+  서버↔게임 에이전트 RPC → Unity 클라, 4단계 전부):
+  - **계정 서버**: `account.proto` - `CreateAccountRequest.nickname` 필드
+    (계정 생성 시에만 입력, 이후 변경 경로 없음) + `GetNicknames` RPC
+    (`GetFriends`와 같은 패턴 - 배치 조회, 없는 playerId는 결과에서
+    빠짐). `AccountRecord.Nickname`/`IAccountRepository.GetNicknamesAsync`·
+    `NicknameExistsAsync`(중복 검사)/`AccountControlService.CreateAccount`
+    (닉네임 필수 검증 + 중복 검사 + 저장, TOCTOU 레이스 방어는 안 함 -
+    진짜 DB 생기면 UNIQUE 제약으로 대체)·`GetNicknames`/`AccountServerIntermediary.GetNicknamesAsync`
+    (공용).
+  - **로그인 서버**: `login.proto`의 `LoginRedirect.nickname`(최초 로그인
+    응답에서만 채움 - 재진입 응답엔 안 채움). `LoginConnectionHandler.CompleteLoginAsync`가
+    `CreateAccountRequest` 경로는 요청의 값을 그대로, `Credentials` 경로는
+    신설한 `ResolveNicknameAsync`로 조회해서 채움. 곁다리 버그(`RequestLobbyAddressAsync`
+    메서드 시그니처 선언 누락)도 같이 고침.
+  - **인게임 서버 ↔ 게임 에이전트 RPC**: `ingame.proto`에 `GetNicknamesRequest`
+    (`request_id`로 상관관계 추적 - 방 전체 단위라 `client_id` 불가)/
+    `GetNicknamesResult`. `GameServerHandler.HandleGetNicknamesAsync`가
+    `HandleFriendCommandAsync`와 같은 패턴으로 계정 서버 대리 호출.
+  - **Unity**: `IIngameServerChannel`/`GrpcIngameServerChannel`에 송수신 +
+    `IngameServerDispatchEvent`/`IngameServerMainThreadDispatcher`에 새
+    케이스. `IngameServerInstance.RequestNicknamesAsync`(Guid 상관관계,
+    `TaskCompletionSource`, 메인 스레드에서 풀림). `Room.Nicknames`(저장소) +
+    `RoomManager.PromoteDrawingRoomAsync`(로스터 확정 시점에 사람 전원의
+    닉네임을 미리 받아서 `Room`에 채워둠 - 봇은 계정이 없어 조회 대상에서
+    제외). `ClientInstance.Nickname`(최초 로그인 성공 시에만 채워지고
+    재접속으로는 절대 안 덮어씀). `AutoChessPlayerState.Nickname`(신설) -
+    `AutoChessGameState.RegisterPlayerState`가 `Room.Nicknames`에서 받아
+    채우고, `UpdatePlayerState`(체력 갱신용)는 기존 값을 그대로 보존(안
+    그러면 데미지 입을 때마다 닉네임이 지워짐). `AutoChessPlayerInfoIndicator`가
+    Team 대신 닉네임을 표시(봇처럼 빈 문자열이면 Team으로 폴백).
+
+
+
+
 ## 통합 테스트 체크리스트
 
 시나리오(S1, S2...)로 묶어서 진행하던 걸 그만두고, 지금은 항목 하나씩 개별로
@@ -164,6 +215,14 @@
   나중에 게임 에이전트가 유니티 `.exe`를 자식 프로세스로 스폰/재시작하는 구조로 이전
   예정 - 지금의 하트비트 비대칭(인게임은 에이전트 끊기면 자기 종료, 에이전트는 안 죽고
   버팀)이 그 전제 조건.
+- **닉네임 - 계정 서버부터 인게임 클라까지 전 구간에 개념 자체가 없음** -
+  proto(계정/로그인/매칭/인게임 전부) 어디에도 `Nickname`/`DisplayName`류
+  필드가 없고, 플레이어는 순수 `PlayerId`(문자열)로만 식별됨. 오토체스
+  인게임 UI(체력창 등)에서 상대 닉네임을 표시하려면 계정 서버가 닉네임을
+  갖고 있다는 전제부터(현재 `InMemoryAccountRepository`에 그런 필드가
+  있는지 확인 필요), 로그인/매칭을 거쳐 인게임 서버까지 전달하는 경로
+  전체를 새로 설계해야 함. 지금은 Unity 쪽에서 `PlayerId`를 그대로 표시하는
+  임시 스텁으로 우회 중.
 - **⚠⚠⚠ 우편함 - 클라이언트(Unity) UI 연동 ⚠⚠⚠** - 서버 배선은 전부 완료.
   `ClientInstance.cs`의 실제 수신/UI(메일함 화면, 클릭→확인→개봉, 알림음/배지)는
   의도적으로 미착수. `mail_id` 기반 식별(위치 아닌 안정적 ID)을 UI 코드가 안 지키면
@@ -172,6 +231,48 @@
   단계엔 안 급함.
 - **서킷 브레이커 / Redis Sentinel·Cluster** - 운영 환경 고가용성 확보용, 개발 단계엔
   단일 Redis로 충분. 구현 방식 미정.
+
+---
+
+## 운영/품질 보강 (외부 리뷰에서 나온 항목)
+
+설계 자체보다는 "실서비스 수준으로 검증·운영할 수 있는가"를 보는 관점에서 비어 있는 것들.
+일반 백엔드 기준으로 가장 먼저 지적받을 순서대로 정렬했다.
+
+- **데이터 영속성이 전혀 없음** - 위 "`AccountServer`/계정 데이터 진짜 DB 전환" 항목과
+  같은 문제의 연장. 계정/우편이 인메모리 더미인 데다 Redis도 `docker-compose`에서
+  영속성을 꺼둔 상태(`--save "" --appendonly no`)라, 서버를 재시작하면 모든 데이터가
+  사라진다. `IAccountRepository`가 이미 분리돼 있으므로 실제 DB 구현체(PostgreSQL/MySQL +
+  EF Core 또는 Dapper)를 추가하는 방향. 세션처럼 휘발돼도 되는 데이터와 계정처럼
+  영속돼야 하는 데이터의 경계도 이때 같이 문서화할 것.
+- **자동화된 테스트가 없음** - 아래 "통합 테스트 체크리스트"는 전부 수동. 최소한
+  `MatchEngine`(대기열/매치 확보/서버 끊김 정리) 단위 테스트와, `RedisSessionRegistry`의
+  Lua 스크립트(소유권 이전 승인/거부, 죽은 서버 판정)를 실제 Redis로 검증하는 통합
+  테스트(Testcontainers 등)부터. 체크리스트의 장애 주입 항목 중 자동화 가능한 것도
+  순차적으로 옮길 것.
+- **인증 핵심부가 아직 더미** - 클라 토큰(`DummyTokenProvider` - `"{무작위값}:{playerId}"`
+  형식, 서명/만료 없음)과 서버 간 인증(`DummyServerAuthenticator`)이 임시 구현.
+  `ARCHITECTURE.md`에 예정으로 적힌 JWT(서명 + 만료 + 회전)와 mTLS로 교체 필요. 위
+  "정식 TLS 인증서" 항목과 함께 진행.
+- **서비스 자체는 컨테이너화돼 있지 않음** - Docker는 Kafka/RabbitMQ/Redis 인프라에만
+  쓰이고, 각 서버는 `start-servers.ps1`이 창을 하나씩 띄우는 방식(Windows/PowerShell
+  전용). 서비스별 Dockerfile + 전체 `docker-compose`로 "명령 한 줄로 전체 기동"이 되게
+  하고, README에 그 절차를 둘 것.
+- **관측성(로그 집계/메트릭/추적)이 없음** - 구조화 로그(`ILogger` 템플릿)는 이미 쓰고
+  있지만 수집·조회 수단이 없음. 서비스가 8개라 요청 하나가 여러 서버를 거치는데 이를
+  따라갈 방법이 없다 - OpenTelemetry(분산 추적 + 메트릭) 도입 검토.
+- **메시징 기술별 역할 정리 문서가 없음** - Kafka/RabbitMQ/Redis Pub/Sub을 모두 쓰는데
+  (실제 흐름: `LobbyControlService`, `GameServerHandler`, `FriendEventPublisher` 등),
+  각각을 어떤 성격의 메시지(이벤트 로그 / 작업 큐 / 실시간 브로드캐스트)에 왜 쓰는지가
+  한 곳에 정리돼 있지 않다. `ARCHITECTURE.md`에 기술별 용도와 선택 이유를 표로 추가할
+  것 - "왜 셋 다 필요한가"에 답하지 못하면 기술 나열로 보일 수 있음. `LobbyServer`의
+  `/test/kafka`, `/test/rabbitmq/*` 엔드포인트는 개발용임을 명시하거나 Development
+  환경에서만 등록되게 할 것.
+- **세션 소유권 Lua 스크립트가 JSON을 정규식으로 파싱함** -
+  `RedisSessionRegistry.TryClaimOwnershipScript`가 `string.match`로 `OwnerServerId`를
+  꺼낸다. 직렬화 형식(필드 순서/공백/이스케이프)이 조금만 바뀌어도 조용히 빈 값이
+  나와 "소유자 없음 → 무조건 승인"으로 빠질 수 있음(보안 영향). 세션을 Redis Hash로
+  저장해 `HGET`으로 읽거나, 최소한 `cjson.decode`로 파싱하도록 변경.
 
 ---
 

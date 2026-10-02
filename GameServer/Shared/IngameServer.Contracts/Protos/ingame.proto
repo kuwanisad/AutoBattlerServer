@@ -66,6 +66,13 @@ message GameServerMessage {
     RoomTimeout room_timeout = 9;                   // 방-채움 타임아웃 - 자체 감지한 결원 보고
     FriendCommandRequest friend_command = 10;       // 인게임 중 친구 관리 명령어 릴레이
     GetMailListRequest get_mail_list = 11;           // 인게임 중 클라의 능동적 우편함 조회 요청
+
+    // DrawingRoom(응접실) 로스터가 확정된 시점에 그 전원의 닉네임을 한 번에
+    // 물어본다 - 친구 관리 릴레이와 같은 원칙(게임 에이전트는 판단 없이
+    // AccountServer로 대리 호출만 함). client_id로 못 짝짓는 이유 - 이 요청은
+    // 특정 클라 하나가 아니라 방 전체(로스터) 단위라서 request_id로 상관관계를
+    // 추적한다(GetNicknamesRequest 메시지 정의 참고).
+    GetNicknamesRequest get_nicknames = 12;
   }
 }
 
@@ -171,6 +178,12 @@ message GetMailListRequest {
   string player_id = 2;   // 인게임 서버가 검증해서 채운 값(클라 자체 신고 신뢰 안 함)
 }
 
+message GetNicknamesRequest {
+  string request_id = 1;  // 응답(GetNicknamesResult)과 짝짓기 위한 임의 식별자(Guid 문자열) -
+                           // 이 요청은 방 전체(로스터) 단위라 client_id로는 못 짝짓는다.
+  repeated string player_ids = 2;
+}
+
 // === 게임 에이전트 → 게임 서버 ===
 
 message GameAgentMessage {
@@ -184,6 +197,7 @@ message GameAgentMessage {
     MailProvided mail_provided = 7;    // 우편함 갱신 - 게임 서버(Unity)가 특정 클라한테 전달
     AnnouncementTask announcement = 8; // 마스터의 공지 지시 릴레이 - MasterServer.AnnouncementTask
                                         // 그대로 재사용(active 포함, 게임 에이전트가 그대로 전달만 함)
+    GetNicknamesResult get_nicknames_result = 9;  // GetNicknamesRequest의 응답
   }
 }
 
@@ -250,6 +264,15 @@ message FriendCommandResponse {
     AddFriendResult add_friend = 3;
     RemoveFriendResult remove_friend = 4;
   }
+}
+
+// GetNicknamesRequest의 응답 - request_id로 짝짓는다.
+message GetNicknamesResult {
+  string request_id = 1;
+  // playerId → 닉네임. 계정을 못 찾은 playerId는 그냥 빠진다(별도 에러 처리 불필요 -
+  // 호출부가 없는 항목을 "닉네임 없음"으로 판단하면 됨. account.proto의
+  // GetNicknamesResponse와 같은 규칙).
+  map<string, string> nicknames = 2;
 }
 
 // 인게임 서버(Unity)가 NGO 접속 완료 시 클라한테 조건 없이 보내는 메시지 - 예전엔

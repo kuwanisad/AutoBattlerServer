@@ -64,6 +64,17 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
             return new CreateAccountResponse { Success = false, ErrorMessage = "계정 ID와 비밀번호를 입력하세요." };
         }
 
+        if (string.IsNullOrEmpty(request.Nickname))
+        {
+            return new CreateAccountResponse { Success = false, ErrorMessage = "닉네임을 입력하세요." };
+        }
+
+        if (await _repository.NicknameExistsAsync(request.Nickname))
+        {
+            _logger.LogWarning("계정 생성 실패 - 이미 존재하는 닉네임: {Nickname}", request.Nickname);
+            return new CreateAccountResponse { Success = false, ErrorMessage = "이미 사용 중인 닉네임입니다." };
+        }
+
         var playerId = await GenerateUniquePlayerIdAsync();
         if (playerId == null)
         {
@@ -78,6 +89,7 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
             AccountId = request.AccountId,
             PasswordHash = _passwordHasher.Hash(request.Password), // 원문은 여기서 끝, 어디에도 저장 안 함
             PlayerId = playerId,
+            Nickname = request.Nickname, // 계정 생성 시에만 입력 - 이후 변경 경로 없음
             CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
 
@@ -114,6 +126,22 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         var friends = await _repository.GetFriendsAsync(request.PlayerId);
         var response = new GetFriendsResponse();
         response.FriendPlayerIds.AddRange(friends);
+        return response;
+    }
+
+    public override async Task<GetNicknamesResponse> GetNicknames(
+        GetNicknamesRequest request, ServerCallContext context)
+    {
+        var nicknames = await _repository.GetNicknamesAsync(request.PlayerIds);
+        var response = new GetNicknamesResponse();
+
+        // MapField<TKey,TValue>.Add(IDictionary<TKey,TValue>)는 IReadOnlyDictionary를
+        // 안 받는다 - 직접 하나씩 채운다.
+        foreach (var kvp in nicknames)
+        {
+            response.Nicknames[kvp.Key] = kvp.Value;
+        }
+
         return response;
     }
 

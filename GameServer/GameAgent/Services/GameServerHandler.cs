@@ -384,6 +384,10 @@ public sealed class GameServerHandler
                         _ = HandleGetMailListAsync(message.GetMailList, serverInfo);
                         break;
 
+                    case GameServerMessage.PayloadOneofCase.GetNicknames:
+                        _ = HandleGetNicknamesAsync(message.GetNicknames, serverInfo);
+                        break;
+
                     case GameServerMessage.PayloadOneofCase.None:
                         break;
 
@@ -650,6 +654,34 @@ public sealed class GameServerHandler
         serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
         {
             FriendCommandResult = response,
+        });
+    }
+
+    /// <summary>DrawingRoom(응접실) 로스터가 확정된 시점에 게임 서버가 그 전원의
+    /// 닉네임을 한 번에 물어본다 - 판단 없이 AccountServer로 대리 호출만
+    /// 한다(HandleFriendCommandAsync와 같은 원칙). 실패해도(계정 서버 접속
+    /// 불가 등) 빈 결과로 응답한다 - 로스터 확정 자체를 막을 이유는 없고,
+    /// 닉네임이 비어있으면 게임 서버 쪽에서 표시만 빈 값으로 처리하면 됨.</summary>
+    private async Task HandleGetNicknamesAsync(IngameServer.GetNicknamesRequest request, GameServerInfo serverInfo)
+    {
+        var result = new GetNicknamesResult { RequestId = request.RequestId };
+
+        try
+        {
+            var response = await _accountServer.GetNicknamesAsync(request.PlayerIds);
+            foreach (var kvp in response.Nicknames)
+            {
+                result.Nicknames[kvp.Key] = kvp.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "닉네임 조회 실패: RequestId={RequestId}", request.RequestId);
+        }
+
+        serverInfo.OutboundQueue.Writer.TryWrite(new GameAgentMessage
+        {
+            GetNicknamesResult = result,
         });
     }
 

@@ -42,6 +42,11 @@ message IngameServerDispatchEvent {
 
     // 마스터의 공지 지시 릴레이 - MasterServer.AnnouncementTask 그대로 재사용(active 포함).
     AnnouncementTask announcement = 8;
+
+    // 게임 에이전트로부터 온 닉네임 조회 응답(ingame.proto의 GetNicknamesResult
+    // 그대로 재사용) - IngameServerInstance.RequestNicknamesAsync가 request_id로
+    // 대기 중인 TaskCompletionSource를 찾아 여기서 풀어준다.
+    GetNicknamesResult get_nicknames_result = 9;
   }
 }
 
