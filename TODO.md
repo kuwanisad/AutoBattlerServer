@@ -57,6 +57,66 @@
 
 
 
+## 코드 리뷰로 발견한 버그 후보 (미검증)
+
+코드를 읽다가 발견한 것들이라 아직 실제로 재현해보지 않았다 - 재현되면
+`KNOWN_ISSUES.md` 형식(발견-원인-예상 피해-해결-결과)으로 옮기고, 재현이
+안 되면 왜 안 되는지 적고 지울 것.
+
+- **정상 종료한 게임만큼 게임 에이전트 부하(`CurrentLoad`)가 영구히 쌓임** -
+  `GameAgent/Services/GameServerHandler.cs`의 `HandlePlayerJoinedAsync`가
+  `CurrentLoad++`, `HandlePlayerLeftAsync`만 감소시킨다. 그런데 정상 종료
+  (`CloseRoomAndRedirectAsync`)로 끊긴 클라는 Unity
+  `IngameServerInstance.OnClientDisconnected`가 "이미 정리된 방"으로 보고
+  `PlayerLeft`를 안 보내고, `CloseRoomAndRedirectAsync` 자신도 부하를 안 줄인다.
+  Unity가 `SendStatusAsync`(실제 부하 보고)를 어디서도 호출하지 않아서 보정
+  경로도 없다. 예상 피해: Capacity(기본 8)만큼 게임이 정상 종료되면
+  `IngameMatchService.PrepareMatch`가 이후 모든 매치를 "수용 불가"로 거부.
+  재현: 같은 게임 에이전트로 게임을 9판 연속 끝까지 진행.
+
+- **매치 중단 후 대기열 복귀 시 `GameType` 유실 + 매칭 타임아웃이 영원히 안 걸림** -
+  `MatchingServer/Services/MatchEngine.cs`의 `DisruptMatch`가 `WaitingPlayer`를
+  다시 만들 때 `GameType`을 안 채워서 `GAME_TYPE_UNSPECIFIED`가 되고(`MatchPlayer`에
+  애초에 GameType 필드가 없음), `JoinedAtUtc`를 매번 지금 시각으로 갱신해서
+  `CheckTimeouts`가 절대 발동하지 않는다. 예상 피해: PrepareMatch가 거부되거나
+  (위 부하 누적 항목과 연쇄) 방 생성이 실패하면 1초마다 재시도 → 실패 → 복귀를
+  무한 반복, 클라는 `MatchFailed`도 못 받고 무한 대기. Unspecified로 방 생성을
+  요청하면 Unity `RoomManager.OpenRoom`이 `UnsupportedGameType`으로 거부하므로
+  한 번 중단된 플레이어는 매칭이 다시 성공할 수도 없다.
+
+- **재접속 유예 타이머가 끊김마다 따로 돌아서, 이전 타이머가 세션을 일찍 지움** -
+  `GameServerHandler.HandlePlayerLeftAsync`의 `Task.Run` 타이머는 30초 뒤
+  "지금 방에 있는지"만 본다. 끊김(t=0) → 재접속(t=5) → 다시 끊김(t=25)이면
+  t=30에 첫 타이머가 "방에 없음"으로 판단해 세션을 삭제한다 - 두 번째 끊김의
+  유예(t=55까지)가 남아있는데도. 끊김마다 세대 번호(또는 CTS)를 두고 최신
+  타이머만 유효하게 해야 함.
+  - 같은 영역 - **유예 시간 불일치**: Unity 쪽 탈주 확정
+    (`NetworkTimeouts.MidGameAbandonTimeout`)은 20초, 게임 에이전트
+    (`ReconnectGracePeriod`)는 30초. 20~30초 사이에 재접속하면 게임 에이전트는
+    승인하지만 Unity에선 이미 `Eliminate()`된 상태로 방에 들어온다. 한쪽 기준으로
+    통일 필요.
+
+- **전입 티켓 만료(10초) 후엔 티켓 검증 자체가 생략됨** -
+  `Shared.Common/Account/MainServerIntermediary.cs`의 `TicketTtl`(10초)이 지나면
+  티켓이 딕셔너리에서 지워지는데, 검증 쪽(`GameServerHandler.HandleApprovalRequestAsync`,
+  `LobbyControlService.EnterLobby`)은 `HasPendingTicket`이 false면 "재접속이라 티켓
+  불필요"로 보고 그냥 통과시킨다. 예상 피해: 훔친 토큰 방어가 10초 동안만 동작 -
+  그 뒤에 도착하면 토큰만으로 통과. 또 정상 클라라도 접속이 10초 넘게 걸리면
+  (NetworkManager 종료 대기 최대 2초 + 접속 지연) 보호 없이 들어오게 됨. "만료된
+  티켓"과 "애초에 티켓이 없는 재접속"을 구분할 수 있게 해야 함.
+
+- **(Unity 인게임 서버) 응접실 승격 도중의 접속/이탈 이벤트가 유실됨** -
+  `Unity/.../Network/Server/Managers/RoomManager.cs`의 `PromoteDrawingRoomAsync`가
+  `_drawingRooms`에서 응접실을 먼저 빼고 나서 `RequestNicknamesAsync`를 await한다.
+  그 사이 도착한 `RegisterConnectedClient`/`UnregisterConnectedClient`는 `_rooms`에도
+  `_drawingRooms`에도 방이 없어서 조용히 무시된다. 예상 피해: 그 틈에 접속한 클라는
+  PlayerController 없이 남고, 그 틈에 끊긴 클라는 접속 중인 걸로 남아 팀/보드를
+  배정받음. 닉네임 조회에 타임아웃이 없어서(게임 에이전트 무응답 시) 이 틈이
+  무한정 길어질 수도 있음. `Unity/TODO.md`에도 같이 적어둘지 검토.
+
+
+
+
 ## 통합 테스트 체크리스트
 
 시나리오(S1, S2...)로 묶어서 진행하던 걸 그만두고, 지금은 항목 하나씩 개별로
