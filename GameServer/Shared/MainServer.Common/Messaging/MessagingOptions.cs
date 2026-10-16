@@ -9,13 +9,4 @@ public sealed class KafkaProducerOptions
     public string BootstrapServers { get; set; } = InfraDefaults.KafkaBootstrapServers;
 }
 
-/// <summary>RabbitMQ 프로듀서 설정. appsettings.json의 "RabbitMQ" 섹션에 매핑된다.</summary>
-public sealed class RabbitMqProducerOptions
-{
-    public const string SectionName = "RabbitMQ";
-    public string Host { get; set; } = InfraDefaults.RabbitMqHost;
-    public int Port { get; set; } = InfraDefaults.RabbitMqPort;
-    public string UserName { get; set; } = InfraDefaults.RabbitMqUserName;
-    public string Password { get; set; } = InfraDefaults.RabbitMqPassword;
-    public string VirtualHost { get; set; } = InfraDefaults.RabbitMqVirtualHost;
-}
+// RabbitMQ 설정은 Shared.Common.Messaging.RabbitMqOptions로 옮김(메인/하위 서버 공통 중개 클래스 RabbitMqBroker).

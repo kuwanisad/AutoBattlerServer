@@ -143,20 +143,27 @@ message MailInfo {
   bool claimed = 6;
 }
 
+// 로비 입장 결과(enum 규칙은 common.proto 참고). 성공/실패 사유가 서로 배타적이라 하나로 합쳤다
+// (예전엔 success + error_message + has_conflicting_session + rate_limited가 따로 있었음).
+enum EnterLobbyResult {
+  ENTER_LOBBY_RESULT_UNSPECIFIED = 0;
+  ENTER_LOBBY_RESULT_OK = 1;
+  ENTER_LOBBY_RESULT_MISSING_CREDENTIALS = 2;      // 인증 정보(playerId/토큰) 없음
+  ENTER_LOBBY_RESULT_INVALID_TOKEN = 3;            // 토큰이 세션과 불일치
+  ENTER_LOBBY_RESULT_INVALID_TRANSFER_TICKET = 4;  // 서버 이동용 전입 티켓이 없거나 틀리거나 만료
+  // 너무 자주 호출해서 서버가 남용 방지로 거부 - 클라는 잠시 후 재시도하면 된다.
+  ENTER_LOBBY_RESULT_RATE_LIMITED = 5;
+  // 다른 서버가 아직 이 플레이어를 살아서 소유 중 - conflicting_server_address에 그 서버 주소.
+  ENTER_LOBBY_RESULT_SESSION_CONFLICT = 6;
+}
+
 message EnterLobbyResponse {
-  bool success = 1;
-  string error_message = 2;
+  EnterLobbyResult result = 1;
+  string detail = 2;  // 로그/디버그용 설명(화면에 표시하지 않음)
 
-  // success = false이고 이게 true면, 다른 서버가 아직 이 플레이어를 살아서 소유 중이라는 뜻.
-  bool has_conflicting_session = 3;
-  string conflicting_server_address = 4;  // 클라가 "진행 중인 게임이 있습니다" 안내에 쓸 주소
+  string conflicting_server_address = 4;  // SESSION_CONFLICT일 때 - "진행 중인 게임이 있습니다" 안내에 쓸 주소
 
-  // success = false이고 이게 true면, 너무 자주 호출해서 서버가 남용 방지로 거부한 것.
-  // has_conflicting_session이랑은 별개 사유 - 클라는 이 경우 그냥 잠시 후 재시도하면 된다.
-  bool rate_limited = 5;
-
-  // success = true일 때 - 새로 발급된 토큰. 클라는 이후 요청(그리고 다음 서버 이동 시
-  // EnterLobby)에 이 값을 써야 한다.
+  // OK일 때 - 새로 발급된 토큰. 클라는 이후 요청(그리고 다음 서버 이동 시 EnterLobby)에 이 값을 써야 한다.
   string token = 6;
 }
 
@@ -195,7 +202,8 @@ message MatchFound {
 }
 
 message MatchFailed {
-  string reason = 1;
+  MatchFailReason reason = 1;  // common.proto
+  string detail = 2;           // 로그/디버그용 설명(화면에 표시하지 않음)
 }
 
 message CancelMatchRequest {}
@@ -219,8 +227,8 @@ message AddFriendRequest {
 }
 
 message AddFriendResponse {
-  bool success = 1;
-  string error_message = 2;
+  FriendResult result = 1;  // common.proto
+  string detail = 2;        // 로그/디버그용 설명(화면에 표시하지 않음)
 }
 
 message RemoveFriendRequest {
@@ -228,6 +236,6 @@ message RemoveFriendRequest {
 }
 
 message RemoveFriendResponse {
-  bool success = 1;
-  string error_message = 2;
+  FriendResult result = 1;  // common.proto
+  string detail = 2;        // 로그/디버그용 설명(화면에 표시하지 않음)
 }

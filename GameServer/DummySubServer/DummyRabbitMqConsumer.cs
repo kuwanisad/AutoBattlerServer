@@ -2,6 +2,7 @@ using RabbitMQ.Client.Events;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Shared.Common.Account;
+using Shared.Common.Messaging;
 using SubServer.Common.Messaging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -31,9 +32,10 @@ public sealed class DummyRabbitMqConsumer : RabbitMqConsumerBase
 
     public DummyRabbitMqConsumer(
         IOptions<RabbitMqConsumerOptions> options,
+        RabbitMqBroker broker,
         RemoteMailNotifier mailNotifier,
         ILogger<DummyRabbitMqConsumer> logger)
-        : base(options, logger)
+        : base(options, broker, logger)
     {
         _mailNotifier = mailNotifier;
         _logger = logger;

@@ -1,3 +1,4 @@
+using Harness.Agent;
 using AccountServer;
 using AccountServer.Debug;
 using AccountServer.Services;
@@ -38,13 +39,15 @@ builder.Services.AddSingleton<MailboxEvictor>();
 // 비밀번호는 절대 원문으로 저장 안 함 - PBKDF2 해시만 저장.
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 
-// 친구 삭제 이벤트를 채팅 서버에 알리기 위한 아웃박스(트랜잭션 아웃박스 패턴) + RabbitMQ.
+// 친구 삭제 이벤트를 채팅 서버에 알리기 위한 RabbitMQ - 아웃박스(쌓아뒀다가 브로커 확인을 받아야 빼기)는
+// RabbitMqBroker가 맡는다(예전 FriendEventOutbox/FriendEventPublisher를 대체).
 builder.Services.AddMainServerMessaging(builder.Configuration);
-builder.Services.AddSingleton<FriendEventOutbox>();
-builder.Services.AddHostedService<FriendEventPublisher>();
 
 builder.Services.AddGrpc();
 builder.Services.AddScoped<AccountControlService>();
+
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 

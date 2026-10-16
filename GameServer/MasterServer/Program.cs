@@ -1,3 +1,4 @@
+using Harness.Agent;
 using Shared.Common.Hosting;
 using GameServer.Common;
 using MasterServer;
@@ -25,10 +26,14 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.AddGrpc();
 builder.Services.AddSingleton<InstanceRegistry>();
+builder.Services.AddSingleton<ActiveAnnouncements>(); // 켜진 공지 기억 - 재접속한 인스턴스에 다시 보내기 위함
 builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisOptions.SectionName));
 
 // TODO: mTLS 도입 시 CompositeServerAuthenticator(+ 개별 검증기)로 교체
 builder.Services.AddSingleton<IServerAuthenticator, DummyServerAuthenticator>();
+
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 
@@ -52,28 +57,25 @@ app.MapPost("/admin/shutdown", (
 
     // "누구한테 보낼지"는 여기(발행하는 시점)에서만 판단한다 - 메시지 자체엔 target
     // 정보를 안 담는다. 받는 쪽은 자기가 어떻게 선택돼서 이 메시지를 받았는지 몰라도 됨.
+    // 종료 지시는 1회성 명령이라 재접속 때 다시 보내지 않는다 - 대신 실제 전달 결과를
+    // 그대로 응답해서, 실패한 대상은 운영자가 다시 보낼 수 있게 한다.
     if (!string.IsNullOrEmpty(instanceId))
     {
-        registry.Enqueue(instanceId, message);
-        return Results.Ok($"인스턴스 {instanceId}에 종료 지시 전달");
+        return registry.Enqueue(instanceId, message)
+            ? Results.Ok($"인스턴스 {instanceId}에 종료 지시 전달")
+            : Results.NotFound($"인스턴스 {instanceId}에 종료 지시 전달 실패 - 접속 중이 아님");
     }
 
-    if (serverType.HasValue)
-    {
-        var targets = registry.GetByType(serverType.Value).ToList();
-        foreach (var instance in targets)
-        {
-            registry.Enqueue(instance.InstanceId, message);
-        }
-        return Results.Ok($"{serverType} 타입 {targets.Count}개 인스턴스에 종료 지시 전달");
-    }
-
-    registry.Broadcast(message);
-    return Results.Ok($"접속 중인 전체 {registry.GetAll().Count}개 인스턴스에 종료 지시 전달");
+    var report = serverType.HasValue
+        ? registry.EnqueueTo(registry.GetByType(serverType.Value), message)
+        : registry.Broadcast(message);
+    var targetName = serverType.HasValue ? $"{serverType} 타입" : "접속 중인 전체";
+    return Results.Ok($"{targetName} 종료 지시: {report}");
 });
 
 app.MapPost("/admin/announce", (
     InstanceRegistry registry,
+    ActiveAnnouncements activeAnnouncements,
     string? instanceId,
     ServerType? serverType,
     AnnouncementType announcementType,
@@ -87,24 +89,29 @@ app.MapPost("/admin/announce", (
         },
     };
 
+    var scope = !string.IsNullOrEmpty(instanceId) ? AnnouncementScope.ForInstance(instanceId)
+        : serverType.HasValue ? AnnouncementScope.ForServerType(serverType.Value)
+        : AnnouncementScope.All;
+
+    // 켜짐/꺼짐 상태를 먼저 기억해 둔다 - 지금 끊겨 있어서 못 받은 인스턴스도 재접속하면
+    // ConnectionHandler가 이 기억을 보고 켜진 공지를 다시 보낸다(그래서 단일 대상이 지금
+    // 접속 중이 아니어도 지시 자체는 유효하다).
+    activeAnnouncements.Apply(announcementType, active, scope);
+
+    var summary = $"(Type={announcementType}, Active={active}, 대상={scope})";
+
     if (!string.IsNullOrEmpty(instanceId))
     {
-        registry.Enqueue(instanceId, masterMessage);
-        return Results.Ok($"인스턴스 {instanceId}에 공지 지시 전달 (Type={announcementType}, Active={active})");
+        return registry.Enqueue(instanceId, masterMessage)
+            ? Results.Ok($"인스턴스 {instanceId}에 공지 지시 전달 {summary}")
+            : Results.Ok($"인스턴스 {instanceId}가 접속 중이 아니라 지금은 전달 못 함 - " +
+                         $"{(active ? "재접속하면 전달됨" : "기억에서 지움")} {summary}");
     }
 
-    if (serverType.HasValue)
-    {
-        var targets = registry.GetByType(serverType.Value).ToList();
-        foreach (var instance in targets)
-        {
-            registry.Enqueue(instance.InstanceId, masterMessage);
-        }
-        return Results.Ok($"{serverType} 타입 {targets.Count}개 인스턴스에 공지 지시 전달 (Type={announcementType}, Active={active})");
-    }
-
-    registry.Broadcast(masterMessage);
-    return Results.Ok($"접속 중인 전체 {registry.GetAll().Count}개 인스턴스에 공지 지시 전달 (Type={announcementType}, Active={active})");
+    var report = serverType.HasValue
+        ? registry.EnqueueTo(registry.GetByType(serverType.Value), masterMessage)
+        : registry.Broadcast(masterMessage);
+    return Results.Ok($"공지 지시: {report} {summary}");
 });
 
 app.Run();

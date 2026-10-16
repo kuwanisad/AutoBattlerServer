@@ -90,15 +90,25 @@ message LoginRedirect {
   string nickname = 6;
 }
 
-// reason 값: "INVALID_CREDENTIALS"(계정/비번 불일치 또는 그 계정 자체가 없음 -
-// Credentials 로그인은 더 이상 자동으로 계정을 만들지 않는다, CreateAccountRequest를
-// 따로 보내야 함), "ACCOUNT_CREATION_FAILED"(CreateAccountRequest인데 ID/닉네임
-// 중복 등으로 생성 실패 - 정확한 사유는 서버 로그에만 남고 클라에는 안 내려줌),
-// "SESSION_CONFLICT"(이미 다른 서버가 이 플레이어를 살아서 소유 중),
-// "NO_LOBBY_AVAILABLE"(매칭 서버가 갈 수 있는 로비를 못 찾음 - "서버가 가득 찼습니다"),
-// "TIMEOUT"(제한 시간 안에 계정 정보 미제출), "INTERNAL_ERROR"(그 외 내부 오류),
-// "NO_ACTIVE_SESSION"(ReconnectRequest인데 살아있는 소유 세션이 없음 - 자격증명으로
-// 처음부터 다시 로그인해야 함), "INVALID_TOKEN"(ReconnectRequest인데 토큰이 세션과 불일치)
+// 로그인 거부 사유(enum 규칙은 common.proto 참고).
+enum LoginRejectReason {
+  LOGIN_REJECT_REASON_UNSPECIFIED = 0;
+  // 계정/비번 불일치 또는 그 계정 자체가 없음 - Credentials 로그인은 더 이상 자동으로 계정을
+  // 만들지 않는다(CreateAccountRequest를 따로 보내야 함). 어느 쪽인지는 클라에 알려주지 않는다
+  // (남의 계정 ID 존재 여부 확인에 악용되지 않게) - 서버 로그에만 남긴다.
+  LOGIN_REJECT_REASON_INVALID_CREDENTIALS = 1;
+  // CreateAccountRequest인데 ID/닉네임 중복 등으로 생성 실패 - 정확한 사유는 서버 로그에만.
+  LOGIN_REJECT_REASON_ACCOUNT_CREATION_FAILED = 2;
+  LOGIN_REJECT_REASON_SESSION_CONFLICT = 3;     // 이미 다른 서버가 이 플레이어를 살아서 소유 중
+  LOGIN_REJECT_REASON_NO_LOBBY_AVAILABLE = 4;   // 매칭 서버가 갈 수 있는 로비를 못 찾음("서버가 가득 찼습니다")
+  LOGIN_REJECT_REASON_TIMEOUT = 5;              // 제한 시간 안에 계정 정보 미제출
+  LOGIN_REJECT_REASON_INTERNAL_ERROR = 6;       // 그 외 내부 오류
+  // ReconnectRequest인데 살아있는 소유 세션이 없음 - 자격증명으로 처음부터 다시 로그인해야 함.
+  LOGIN_REJECT_REASON_NO_ACTIVE_SESSION = 7;
+  LOGIN_REJECT_REASON_INVALID_TOKEN = 8;        // ReconnectRequest인데 토큰이 세션과 불일치
+}
+
 message LoginRejected {
-  string reason = 1;
+  LoginRejectReason reason = 1;
+  string detail = 2;  // 로그/디버그용 설명(화면에 표시하지 않음)
 }

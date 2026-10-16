@@ -57,65 +57,58 @@
 
 
 
-## 코드 리뷰로 발견한 버그 후보 (미검증)
+## 코드 리뷰로 발견해 수정한 항목 (런타임 검증 필요)
 
-코드를 읽다가 발견한 것들이라 아직 실제로 재현해보지 않았다 - 재현되면
-`KNOWN_ISSUES.md` 형식(발견-원인-예상 피해-해결-결과)으로 옮기고, 재현이
-안 되면 왜 안 되는지 적고 지울 것.
+처음엔 "버그 후보(미검증)"로 적어뒀던 것들 - 코드를 따라가며 원인을 확정하고 수정까지 했지만,
+Unity 인게임 서버가 필요한 경로라 실제 실행으로는 아직 확인하지 못했다. PC에서 한 판(매칭 →
+인게임 접속 → 끊김/재접속 → 게임 종료)을 돌려 확인되면 `KNOWN_ISSUES.md` 형식(발견-원인-예상
+피해-해결-결과)으로 옮기고 여기서 지울 것. 테스트 하네스의 가짜 인게임 서버가 생기면 자동화 대상
+(`TestHarness/TODO.md`).
 
-- **정상 종료한 게임만큼 게임 에이전트 부하(`CurrentLoad`)가 영구히 쌓임** -
-  `GameAgent/Services/GameServerHandler.cs`의 `HandlePlayerJoinedAsync`가
-  `CurrentLoad++`, `HandlePlayerLeftAsync`만 감소시킨다. 그런데 정상 종료
-  (`CloseRoomAndRedirectAsync`)로 끊긴 클라는 Unity
-  `IngameServerInstance.OnClientDisconnected`가 "이미 정리된 방"으로 보고
-  `PlayerLeft`를 안 보내고, `CloseRoomAndRedirectAsync` 자신도 부하를 안 줄인다.
-  Unity가 `SendStatusAsync`(실제 부하 보고)를 어디서도 호출하지 않아서 보정
-  경로도 없다. 예상 피해: Capacity(기본 8)만큼 게임이 정상 종료되면
-  `IngameMatchService.PrepareMatch`가 이후 모든 매치를 "수용 불가"로 거부.
-  재현: 같은 게임 에이전트로 게임을 9판 연속 끝까지 진행.
+- **정상 종료한 게임만큼 게임 에이전트 부하(`CurrentLoad`)가 영구히 쌓임** - 원인: 게임 에이전트가
+  `PlayerJoined/Left`로 직접 셌는데 정상 종료(`CloseRoomAndRedirectAsync`)된 방의 인원을 빼는 경로가
+  없었음. 수정: 부하는 Unity `ServerLoadTracker` 한 곳에서 "자리" 단위로 세서 `GameServerStatus`로
+  보고, 게임 에이전트는 저장/전달만. 수락~응접실 생성 사이 정원 초과는 `GameServerInfo.TryReserveSeats`로
+  막음. **같이 정리됨**: proto 주석은 "매치 수", 게임 에이전트는 "사람 수"로 단위가 어긋나 있던 것 →
+  "자리"로 통일. Unity `_capacity` 기본값을 64(오토체스 8판)로 바꿨지만 **씬/프리팹 인스펙터 값이
+  우선하니 확인 필요**(8이면 동시에 한 판만 열림).
+- **매치 중단 후 대기열 복귀 시 `GameType` 유실 + 매칭 타임아웃이 영원히 안 걸림** - 수정:
+  `DisruptMatch`가 사유(`MatchDisruption`)를 받아 이탈자/끊긴 로비 소속은 증발시키고, 복귀자는
+  `GameType`과 처음 대기열에 들어온 시각을 그대로 되살림. 런타임 확인: 지원 안 하는 GameType 거부와
+  정상 타임아웃은 샌드박스에서 확인, PrepareMatch 반복 거부 시 타임아웃은 미확인.
+- **재접속 유예 타이머가 끊김마다 따로 돌고, Unity(20초)와 게임 에이전트(30초)의 유예 시간이 달랐음** -
+  수정: 판단을 Unity로 일원화. 재접속 허용 여부와 유예 시간은 방의 게임 모드(`ReconnectableGameMode`의
+  필드 / `NonReconnectableGameMode`)가 정하고, 게임 에이전트는 `PlayerLeft.reconnectable`/
+  `PlayerAbandoned` 결과만 실행(자체 타이머/`GetAllowReconnect` 제거). 탈락 확정자의 재접속은
+  `PLAYER_ABANDONED`로 거부(예전엔 20~30초 사이에 돌아오면 팀 없는 새 컨트롤러로 부활할 수 있었음).
+- **전입 티켓 만료(10초) 후엔 티켓 검증 자체가 생략됨** - 수정: 세션 상태에 `Reconnecting`을 추가해
+  "티켓이 필요한 이동(`Moving`)"과 "티켓이 없는 재접속"을 상태로 구분. 같이 고친 것: 틀린 티켓으로
+  진짜 티켓이 지워지던 것(→ 만료 이벤트가 안 와서 세션이 영원히 남던 루프), 로그인 서버가 이동 중인
+  세션에 이전 서버 주소(`CurrentServer`)를 안내하던 것(→ `NextServer`), 티켓 TTL 안에 안 온 클라의
+  세션이 남던 것(→ 받는 쪽 서버가 `OnTicketExpired`에서 삭제), 클라가 로그인 서버 재진입 때 빈 티켓을
+  내던 것(→ 받아둔 티켓 재사용). 런타임 확인: 로비 쪽 티켓 검사/만료 삭제/로그인 서버 안내 주소는
+  샌드박스에서 실제 RPC로 확인, 게임 에이전트 쪽 승인 조건은 미확인.
+- **(Unity 인게임 서버) 응접실 승격 도중의 접속/이탈 이벤트가 유실됨** - 수정: 승격 중인 응접실을
+  `_pendingDrawingRooms`에 두어 그동안의 접속 완료/끊김/승인 요청/방 종료가 계속 반영되게 하고,
+  닉네임 조회를 승격 절차에 포함(5초 타임아웃 `NetworkTimeouts.NicknameFetchTimeout`, 한 명이라도
+  못 받으면 방을 깨뜨림 - 승격 중 계정 삭제 대비). 로스터는 기다림이 끝난 시점의 실제 접속자로 만든다.
 
-- **매치 중단 후 대기열 복귀 시 `GameType` 유실 + 매칭 타임아웃이 영원히 안 걸림** -
-  `MatchingServer/Services/MatchEngine.cs`의 `DisruptMatch`가 `WaitingPlayer`를
-  다시 만들 때 `GameType`을 안 채워서 `GAME_TYPE_UNSPECIFIED`가 되고(`MatchPlayer`에
-  애초에 GameType 필드가 없음), `JoinedAtUtc`를 매번 지금 시각으로 갱신해서
-  `CheckTimeouts`가 절대 발동하지 않는다. 예상 피해: PrepareMatch가 거부되거나
-  (위 부하 누적 항목과 연쇄) 방 생성이 실패하면 1초마다 재시도 → 실패 → 복귀를
-  무한 반복, 클라는 `MatchFailed`도 못 받고 무한 대기. Unspecified로 방 생성을
-  요청하면 Unity `RoomManager.OpenRoom`이 `UnsupportedGameType`으로 거부하므로
-  한 번 중단된 플레이어는 매칭이 다시 성공할 수도 없다.
+---
 
-- **재접속 유예 타이머가 끊김마다 따로 돌아서, 이전 타이머가 세션을 일찍 지움** -
-  `GameServerHandler.HandlePlayerLeftAsync`의 `Task.Run` 타이머는 30초 뒤
-  "지금 방에 있는지"만 본다. 끊김(t=0) → 재접속(t=5) → 다시 끊김(t=25)이면
-  t=30에 첫 타이머가 "방에 없음"으로 판단해 세션을 삭제한다 - 두 번째 끊김의
-  유예(t=55까지)가 남아있는데도. 끊김마다 세대 번호(또는 CTS)를 두고 최신
-  타이머만 유효하게 해야 함.
-  - 같은 영역 - **유예 시간 불일치**: Unity 쪽 탈주 확정
-    (`NetworkTimeouts.MidGameAbandonTimeout`)은 20초, 게임 에이전트
-    (`ReconnectGracePeriod`)는 30초. 20~30초 사이에 재접속하면 게임 에이전트는
-    승인하지만 Unity에선 이미 `Eliminate()`된 상태로 방에 들어온다. 한쪽 기준으로
-    통일 필요.
+## 다음에 논의할 항목
 
-- **전입 티켓 만료(10초) 후엔 티켓 검증 자체가 생략됨** -
-  `Shared.Common/Account/MainServerIntermediary.cs`의 `TicketTtl`(10초)이 지나면
-  티켓이 딕셔너리에서 지워지는데, 검증 쪽(`GameServerHandler.HandleApprovalRequestAsync`,
-  `LobbyControlService.EnterLobby`)은 `HasPendingTicket`이 false면 "재접속이라 티켓
-  불필요"로 보고 그냥 통과시킨다. 예상 피해: 훔친 토큰 방어가 10초 동안만 동작 -
-  그 뒤에 도착하면 토큰만으로 통과. 또 정상 클라라도 접속이 10초 넘게 걸리면
-  (NetworkManager 종료 대기 최대 2초 + 접속 지연) 보호 없이 들어오게 됨. "만료된
-  티켓"과 "애초에 티켓이 없는 재접속"을 구분할 수 있게 해야 함.
+- **인게임 서버(Unity)가 죽었을 때 게임 에이전트의 세션 정리** - 지금은 부하를 0으로 보고만 하고
+  (`GameServerHandler.HandleAsync`의 `finally`), 그 방 사람들의 세션은 "소유자 = 살아있는 게임 에이전트"로
+  남아 로그인 서버가 계속 이 에이전트로 안내한다. 실서비스에서는 게임 에이전트가 Unity를 자식
+  프로세스로 띄우고 재시작하는 구조(아래 "게임 에이전트의 유니티 프로세스 슈퍼바이저화")가 될
+  예정이라, 그 작업 때 같이 결정하기로 함.
+- **실패 사유 열거형 2차 범위** - 1차(클라에 닿는 필드)는 완료. 남은 것: `RoomOpened.error_message`
+  (Unity `GameErrorCode` → 한글 문장 테이블이 `GrpcIngameServerChannel`에 있음), 매칭 서버
+  `CancelRoom.reason`, `Shared.Common`의 `GrantMail`/`OpenMail` 메시지, NGO 종료 사유 `"ROOM_CLOSED"`
+  문자열, 게임 에이전트에서 친구 명령 처리 중 예외가 나면 응답 자체를 안 보내는 것.
+- **Normal 정원** - `MatchingConstants`에서 테스트 동안 1명. 테스트가 끝나면 8(사람 1 + 봇 7)로 되돌릴 것.
 
-- **(Unity 인게임 서버) 응접실 승격 도중의 접속/이탈 이벤트가 유실됨** -
-  `Unity/.../Network/Server/Managers/RoomManager.cs`의 `PromoteDrawingRoomAsync`가
-  `_drawingRooms`에서 응접실을 먼저 빼고 나서 `RequestNicknamesAsync`를 await한다.
-  그 사이 도착한 `RegisterConnectedClient`/`UnregisterConnectedClient`는 `_rooms`에도
-  `_drawingRooms`에도 방이 없어서 조용히 무시된다. 예상 피해: 그 틈에 접속한 클라는
-  PlayerController 없이 남고, 그 틈에 끊긴 클라는 접속 중인 걸로 남아 팀/보드를
-  배정받음. 닉네임 조회에 타임아웃이 없어서(게임 에이전트 무응답 시) 이 틈이
-  무한정 길어질 수도 있음. `Unity/TODO.md`에도 같이 적어둘지 검토.
-
-
-
+---
 
 ## 통합 테스트 체크리스트
 
@@ -217,7 +210,9 @@
       결국 이벤트를 발행하는지. 확인 결과 발행 안 됨 - `FriendEventOutbox`가 순수
       인메모리라 재시작하면 대기 중이던 이벤트가 그냥 사라짐(이미 알려진 한계,
       새 버그 아님). "`AccountServer`/계정 데이터 진짜 DB 전환" 항목에서 같이
-      해결될 예정 - 그 전까지는 친구 삭제 통보가 유실될 수 있다는 걸 감안할 것
+      해결될 예정 - 그 전까지는 친구 삭제 통보가 유실될 수 있다는 걸 감안할 것.
+      (이후 `FriendEventOutbox`는 `RabbitMqBroker`의 발행 버퍼로 대체됐는데, 이것도 메모리에만
+      있어서 같은 한계가 그대로 남아있다.)
 
 ### 정책/한계값
 - [x] 우편함 상한선 초과 시 밀어내기 순서(수령됨 > 만료됨 > 오래된 것). 상한선 1로
@@ -261,11 +256,12 @@
   미리 알려줘서 재연결 루프 자체를 안 타게 해야 함 - 로그인 서버 재진입 UI 작업과
   같이 정리하면 좋을 듯.
 - **`AccountServer`/계정 데이터 진짜 DB 전환** - `InMemoryAccountRepository`/
-  `InMemoryMailRepository` 전부 더미. 친구 목록 아웃박스(`FriendEventOutbox`)도 이때
-  같이 DB 트랜잭션으로 묶을 것 - 실제로 발행 직전 크래시 테스트로 유실 확인됨
-  (테스트 계획 "동시성" 항목 참고).
-- **실력 점수 기반 매칭 알고리즘** - 지금은 더미(1명이면 즉시 매칭). `game_type`별
-  대기열 분리도 같이.
+  `InMemoryMailRepository` 전부 더미. 친구 삭제 이벤트 발행도 이때 같이 DB 트랜잭션으로
+  묶을 것 - 지금은 `RabbitMqBroker` 발행 버퍼(메모리)라 발행 전 크래시 시 유실됨(예전
+  `FriendEventOutbox`로 유실 확인됨, 테스트 계획 "동시성" 항목 참고).
+- **실력 점수 기반 매칭 알고리즘** - 지금은 먼저 온 순서. `game_type`별 대기열 분리와
+  정원 규칙(`MatchingConstants.MatchRule`)은 완료 - 게임 모드별 정원 미달 처리
+  (`ShortfallPolicy`)는 기본값(`RequireFull`) 하나만 있음.
 - **실배포용 정식 TLS 인증서** - 로컬 개발용 자체 서명 인증서 공유 중.
 - **마스터 지시 `Drain` 업무 - 확장 패턴만 검증됨, 실제 로직 미구현** - `Shutdown`/
   `Announcement`(공지)로 `oneof` 확장 구조 자체는 실증 완료. `Drain`은 서버 타입별로
@@ -275,14 +271,6 @@
   나중에 게임 에이전트가 유니티 `.exe`를 자식 프로세스로 스폰/재시작하는 구조로 이전
   예정 - 지금의 하트비트 비대칭(인게임은 에이전트 끊기면 자기 종료, 에이전트는 안 죽고
   버팀)이 그 전제 조건.
-- **닉네임 - 계정 서버부터 인게임 클라까지 전 구간에 개념 자체가 없음** -
-  proto(계정/로그인/매칭/인게임 전부) 어디에도 `Nickname`/`DisplayName`류
-  필드가 없고, 플레이어는 순수 `PlayerId`(문자열)로만 식별됨. 오토체스
-  인게임 UI(체력창 등)에서 상대 닉네임을 표시하려면 계정 서버가 닉네임을
-  갖고 있다는 전제부터(현재 `InMemoryAccountRepository`에 그런 필드가
-  있는지 확인 필요), 로그인/매칭을 거쳐 인게임 서버까지 전달하는 경로
-  전체를 새로 설계해야 함. 지금은 Unity 쪽에서 `PlayerId`를 그대로 표시하는
-  임시 스텁으로 우회 중.
 - **⚠⚠⚠ 우편함 - 클라이언트(Unity) UI 연동 ⚠⚠⚠** - 서버 배선은 전부 완료.
   `ClientInstance.cs`의 실제 수신/UI(메일함 화면, 클릭→확인→개봉, 알림음/배지)는
   의도적으로 미착수. `mail_id` 기반 식별(위치 아닌 안정적 ID)을 UI 코드가 안 지키면
@@ -305,11 +293,12 @@
   사라진다. `IAccountRepository`가 이미 분리돼 있으므로 실제 DB 구현체(PostgreSQL/MySQL +
   EF Core 또는 Dapper)를 추가하는 방향. 세션처럼 휘발돼도 되는 데이터와 계정처럼
   영속돼야 하는 데이터의 경계도 이때 같이 문서화할 것.
-- **자동화된 테스트가 없음** - 아래 "통합 테스트 체크리스트"는 전부 수동. 최소한
-  `MatchEngine`(대기열/매치 확보/서버 끊김 정리) 단위 테스트와, `RedisSessionRegistry`의
-  Lua 스크립트(소유권 이전 승인/거부, 죽은 서버 판정)를 실제 Redis로 검증하는 통합
-  테스트(Testcontainers 등)부터. 체크리스트의 장애 주입 항목 중 자동화 가능한 것도
-  순차적으로 옮길 것.
+- **자동화된 테스트가 부족함** - 별도 저장소 `TestHarness`에 E2E 기반이 생겼다(서버 기동/종료
+  스크립트 연동, 서버·Unity 원격 디버그 명령, Unity 없이 로비까지 도는 `HeadlessClient`와 그
+  스모크). 아래 "통합 테스트 체크리스트"는 아직 대부분 수동이라 하네스 시나리오로 옮겨야 하고,
+  인게임 경로는 가짜 인게임 서버가 필요하다(`TestHarness/TODO.md`). 단위 테스트는 여전히 없음 -
+  `MatchEngine`(대기열/매치 확보/서버 끊김 정리)과 `RedisSessionRegistry`의 Lua 스크립트(소유권
+  이전 승인/거부, 죽은 서버 판정)를 실제 Redis로 검증하는 통합 테스트(Testcontainers 등)부터.
 - **인증 핵심부가 아직 더미** - 클라 토큰(`DummyTokenProvider` - `"{무작위값}:{playerId}"`
   형식, 서명/만료 없음)과 서버 간 인증(`DummyServerAuthenticator`)이 임시 구현.
   `ARCHITECTURE.md`에 예정으로 적힌 JWT(서명 + 만료 + 회전)와 mTLS로 교체 필요. 위
@@ -322,7 +311,8 @@
   있지만 수집·조회 수단이 없음. 서비스가 8개라 요청 하나가 여러 서버를 거치는데 이를
   따라갈 방법이 없다 - OpenTelemetry(분산 추적 + 메트릭) 도입 검토.
 - **메시징 기술별 역할 정리 문서가 없음** - Kafka/RabbitMQ/Redis Pub/Sub을 모두 쓰는데
-  (실제 흐름: `LobbyControlService`, `GameServerHandler`, `FriendEventPublisher` 등),
+  (실제 흐름: `LobbyControlService`, `GameServerHandler`, `AccountControlService` 등 - RabbitMQ는
+  이제 전부 `RabbitMqBroker` 경유, `ARCHITECTURE.md` "브로커"에 동작 정리됨),
   각각을 어떤 성격의 메시지(이벤트 로그 / 작업 큐 / 실시간 브로드캐스트)에 왜 쓰는지가
   한 곳에 정리돼 있지 않다. `ARCHITECTURE.md`에 기술별 용도와 선택 이유를 표로 추가할
   것 - "왜 셋 다 필요한가"에 답하지 못하면 기술 나열로 보일 수 있음. `LobbyServer`의
@@ -388,7 +378,16 @@
 
 ### 매칭 / 재접속
 - 매칭 정상 흐름 전부 구현, 매칭/로비/인게임 서버 다운 시나리오 처리(`CompensatingTransaction`).
-- 재접속 정책: `GameType`별 허용 여부, 재접 가능 방은 유예 타이머로 세션 유지.
+- 재접속 정책: 허용 여부와 유예 시간은 방의 게임 모드가 정함(`ReconnectableGameMode`/
+  `NonReconnectableGameMode`), 탈주자 감시도 방마다 게임 모드가 함(InGameId 인덱스 배열,
+  할당 없음). 게임 에이전트는 `PlayerLeft.reconnectable`/`PlayerAbandoned` 결과만 실행.
+- **세션 상태 `Reconnecting` 추가** - "티켓이 필요한 이동(`Moving`)"과 "티켓이 없는 재접속"을
+  상태로 구분. 게임 에이전트/로비의 티켓 검사가 상태 + 소유자 기준으로 바뀜, 티켓 만료 시 받는
+  쪽 서버가 세션 삭제, 로그인 서버가 이동 중인 세션은 `NextServer`로 안내.
+- **매칭 서버 GameType별 대기열** - `MatchingConstants`(타임아웃/루프 간격/GameType별 정원),
+  지원 안 하는 GameType 거부(로비가 `MatchFailed`로 전달), `DisruptMatch` 사유 기반 처리.
+- **부하 단일 경로** - Unity `ServerLoadTracker`가 "자리" 단위로 세서 보고, 게임 에이전트는
+  저장/전달 + 수락~응접실 생성 사이 예약만.
 - **재접속 빠른 경로 + `RoomPolicy`** - 재접속 가능한 방은 로그인 서버 없이 캐시된
   인게임 주소로 직접 재시도. `ConnectionWelcome`(NGO 접속 완료 시 조건 없이 매번
   `allow_reconnect` 전달, 예전 조건부 `TokenUpdate` 대체)으로 정보를 받고, `RoomPolicy`
@@ -430,6 +429,21 @@
   `GameManager`, 순수 네트워크 전달은 `IngameServerInstance`가 소비하는 기준 확정.
   클라/서버 이벤트 전부(로비 전환, 채팅, 우편함, 친구 관리, 방 관리, 공지) 재배선
   완료 - 빈 처리부 없음.
+
+### 메시징 / 실패 사유 / 마스터
+- **`RabbitMqBroker`로 RabbitMQ 접속 일원화** - 성공할 때까지 재접속, 대상별 발행 버퍼(기본
+  무제한, 대상별 한도 설정 가능), publisher confirm 후 삭제, 재접속 시 구독 재개.
+  `RabbitMqProducer`/`RabbitMqConsumer`/`FriendEventOutbox`/`FriendEventPublisher` 삭제.
+- **실패 사유를 문자열에서 proto 열거형으로** - `LoginRejectReason`/`EnterLobbyResult`/
+  `MatchFailReason`/`FriendResult`/`ApprovalDecision`(+ 로그용 `detail`). Unity는 `ClientFailure`와
+  `EnumToScreenText`(언어별 화면 문구 테이블). 규칙은 `common.proto` 상단 주석.
+- **마스터 전달 실패 기록 + 켜진 공지 재전송** - `InstanceRegistry.Enqueue`가 결과 반환/로그,
+  관리자 API가 실제 전달 결과로 응답, `ActiveAnnouncements`로 재접속한 인스턴스에 켜진 공지 재전송.
+
+### 테스트 하네스 연동
+- 서버 8개에 `Harness.Agent`(`Shared/Test/`) - `HARNESS_ADDRESS`가 있을 때만 하네스에 붙어 원격
+  디버그 명령(`[HarnessCommand]`)과 이벤트 제공. `DevTools` 기동/종료 스크립트에 하네스 모드
+  (`-LogDir`: JSON 로그 파일, PID 파일, 준비 대기) 추가.
 
 ### 기타
 - fire-and-forget 함수 전체를 try-catch로 감싸는 관례 확립 및 전체 점검 완료.

@@ -1,3 +1,4 @@
+using GameServer.Common;
 using Grpc.Core;
 using Grpc.Net.Client;
 using LobbyServer.Auth;
@@ -37,7 +38,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     private readonly IRateLimiter _rateLimiter;
     private readonly MasterConnectionService _masterConnection;
     private readonly MatchNotificationDispatcher _notificationDispatcher;
-    private readonly RabbitMqProducer _rabbitMqProducer;
+    private readonly RabbitMqBroker _rabbitMq;
     private readonly ILogger<LobbyControlService> _logger;
 
     public LobbyControlService(
@@ -51,7 +52,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         IRateLimiter rateLimiter,
         MasterConnectionService masterConnection,
         MatchNotificationDispatcher notificationDispatcher,
-        RabbitMqProducer rabbitMqProducer,
+        RabbitMqBroker rabbitMq,
         ILogger<LobbyControlService> logger)
     {
         _tokenProvider = tokenProvider;
@@ -64,7 +65,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         _rateLimiter = rateLimiter;
         _masterConnection = masterConnection;
         _notificationDispatcher = notificationDispatcher;
-        _rabbitMqProducer = rabbitMqProducer;
+        _rabbitMq = rabbitMq;
         _logger = logger;
     }
 
@@ -92,7 +93,8 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
     /// <summary>
     /// 세션이 삭제될 때 채팅 서버에 알린다 - "서비스 제공 가능 여부는 전적으로 메인
     /// 서버한테 맡긴다"는 원칙에 따라, 채팅 서버는 이 신호로만 연결 종료를 판단한다.
-    /// 발행 실패는 로그만 남기고 삼킨다 - 세션 삭제 자체(이미 끝남)를 막을 이유는 아니다.
+    /// RabbitMqBroker는 버퍼에 넣고 바로 돌아온다 - RabbitMQ가 끊겨 있어도 쌓아뒀다가 접속되면 보낸다.
+    /// 여기서 잡는 예외는 직렬화 같은 로컬 오류뿐이고, 로그만 남기고 삼킨다(세션 삭제 자체는 이미 끝남).
     /// </summary>
     private void PublishSessionInvalidated(string playerId)
     {
@@ -100,7 +102,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             var json = System.Text.Json.JsonSerializer.Serialize(
                 new SessionInvalidatedEvent { PlayerId = playerId });
-            _rabbitMqProducer.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
+            _rabbitMq.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
         }
         catch (Exception ex)
         {
@@ -128,7 +130,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var submittedToken = context.UserState["token"] as string ?? string.Empty;
         if (string.IsNullOrEmpty(playerId))
         {
-            return new EnterLobbyResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+            return new EnterLobbyResponse { Result = EnterLobbyResult.MissingCredentials };
         }
 
         // 남용 방지 - 이 시간 안에 실제 세션 정리가 끝나는지와는 무관하다(별개 관심사).
@@ -136,7 +138,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var allowed = await _rateLimiter.TryAcquireAsync($"ratelimit:enterlobby:{playerId}", EnterLobbyRateLimitWindow);
         if (!allowed)
         {
-            return new EnterLobbyResponse { Success = false, RateLimited = true };
+            return new EnterLobbyResponse { Result = EnterLobbyResult.RateLimited };
         }
 
         var existing = await _sessionRegistry.GetAsync(playerId);
@@ -149,13 +151,18 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         if (!TokenVerification.IsValid(existing, submittedToken))
         {
             _logger.LogWarning("토큰 불일치로 로비 입장 거부: {PlayerId}", playerId);
-            return new EnterLobbyResponse { Success = false, ErrorMessage = "INVALID_TOKEN" };
+            return new EnterLobbyResponse { Result = EnterLobbyResult.InvalidToken };
         }
 
         // 인게임에서 돌아오는 전환이면 일회용 임시 티켓도 검증한다 - 훔친 영구 토큰으로
-        // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 로그인 서버발
-        // 최초 진입 등 다른 경로는 애초에 이 로비한테 미리 등록된 티켓이 없으므로
-        // 대상이 아니다 - HasPendingTicket으로 구분한다.
+        // 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 판단 기준은 세션
+        // 상태다: 이동 중(Moving)이고 그 이동 대상이 이 로비(OwnerServerId)면 반드시 티켓을
+        // 소비해야 하고, 티켓이 TTL(10초)로 이미 지워졌으면 거부한다. 로그인 서버발 최초 진입
+        // (Status=Lobby, 소유자=로그인 서버)이나 재접속 불가 방에서 끊겨 소유자를 비운 세션은
+        // 대상이 아니다.
+        //
+        // 예전엔 HasPendingTicket(티켓이 아직 있는가)으로 판단해서, 티켓 만료 뒤에 온 클라는
+        // 검증 없이 통과했다.
         //
         // 원래는 existing.OwnerServerType == Ingame으로 구분했었는데, 게임 에이전트의
         // CloseRoomAndRedirectAsync가 리다이렉트 준비 시점에 OwnerServerType을 이미
@@ -163,12 +170,14 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         // 티켓 검증 자체가 통째로 스킵되고 있었다 - 게임 에이전트 쪽(GameServerHandler)
         // 승인 로직에서 같은 패턴의 버그를 먼저 발견해서 고치면서 여기도 같이 확인함
         // (KNOWN_ISSUES.md 참고).
-        if (_mainServerIntermediary.HasPendingTicket(playerId))
+        if (existing != null &&
+            existing.Status == PlayerStatus.Moving &&
+            existing.OwnerServerId == _masterConnection.InstanceId)
         {
             if (!_mainServerIntermediary.TryConsume(playerId, request.TransferTicket))
             {
                 _logger.LogWarning("전입 티켓 불일치/만료로 로비 입장 거부: {PlayerId}", playerId);
-                return new EnterLobbyResponse { Success = false, ErrorMessage = "INVALID_TRANSFER_TICKET" };
+                return new EnterLobbyResponse { Result = EnterLobbyResult.InvalidTransferTicket };
             }
         }
 
@@ -190,7 +199,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         if (result.Claimed)
         {
             _logger.LogInformation("로비 입장: {PlayerId}", playerId);
-            return new EnterLobbyResponse { Success = true, Token = newToken };
+            return new EnterLobbyResponse { Result = EnterLobbyResult.Ok, Token = newToken };
         }
 
         _logger.LogInformation("로비 입장 거부 - 다른 서버가 아직 소유 중: {PlayerId} @ {Address}",
@@ -198,8 +207,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
 
         return new EnterLobbyResponse
         {
-            Success = false,
-            HasConflictingSession = true,
+            Result = EnterLobbyResult.SessionConflict,
             ConflictingServerAddress = result.PreviousOwner?.Address ?? string.Empty,
         };
     }
@@ -368,7 +376,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             await responseStream.WriteAsync(new MatchEvent
             {
-                MatchFailed = new MatchFailed { Reason = "플레이어 ID 없음" },
+                MatchFailed = new MatchFailed { Reason = MatchFailReason.PlayerIdMissing },
             });
             return;
         }
@@ -382,7 +390,7 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         {
             await responseStream.WriteAsync(new MatchEvent
             {
-                MatchFailed = new MatchFailed { Reason = "이 서버 소속이 아닙니다." },
+                MatchFailed = new MatchFailed { Reason = MatchFailReason.NotOwnedByThisServer },
             });
             return;
         }
@@ -391,22 +399,15 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         // 검사하는 곳이 없었고 오히려 매칭 대기 중 끊긴 세션이 정리 안 되는 리크만
         // 만들었다(위 enum 정의 주석, KNOWN_ISSUES.md 참고).
 
-        // 매칭 서버에 JoinMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김)
-        if (!string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+        // 매칭 서버에 JoinMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김).
+        // 예전엔 결과를 안 보고 무조건 "대기열 진입"을 보냈다 - 그러면 매칭 서버가 거부했거나(지원 안
+        // 하는 GameType 등) 호출 자체가 실패해도, 대기열에 없으니 타임아웃도 안 걸려서 클라가 영원히
+        // 기다렸다. 이제 실패하면 그 사유로 MatchFailed를 보내고 끝낸다.
+        var joinFailure = await TryJoinMatchAsync(playerId, request.GameType);
+        if (joinFailure != null)
         {
-            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
-            var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
-            await client.JoinMatchAsync(new JoinMatchRequest
-            {
-                PlayerId = playerId,
-                LobbyServerId = _masterConnection.InstanceId,
-                SkillScore = 0, // TODO: 실력 점수 연동
-                GameType = request.GameType,
-            });
-        }
-        else
-        {
-            _logger.LogWarning("매칭 서버 주소 없음 - 매칭 서버가 연결됐는지 확인하세요.");
+            await responseStream.WriteAsync(new MatchEvent { MatchFailed = joinFailure });
+            return;
         }
 
         // 대기열 진입 알림
@@ -457,6 +458,39 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
                 _logger.LogInformation("매칭 중 클라 접속 끊김 - LeaveMatch 요청: {PlayerId}", playerId);
                 await RequestLeaveMatchAsync(playerId);
             }
+        }
+    }
+
+    /// <summary>매칭 서버 대기열에 넣는다. 성공하면 null, 실패하면 클라에 보낼 MatchFailed.</summary>
+    private async Task<MatchFailed?> TryJoinMatchAsync(string playerId, GameServer.Common.GameType gameType)
+    {
+        if (string.IsNullOrEmpty(_masterConnection.MatchingServerAddress))
+        {
+            _logger.LogWarning("매칭 서버 주소 없음 - 매칭 서버가 연결됐는지 확인하세요. (Player={PlayerId})", playerId);
+            return new MatchFailed { Reason = MatchFailReason.MatchingServerUnavailable, Detail = "matching server address unknown" };
+        }
+
+        try
+        {
+            using var channel = GrpcChannel.ForAddress(_masterConnection.MatchingServerAddress);
+            var client = new LobbyMatchControl.LobbyMatchControlClient(channel);
+            var response = await client.JoinMatchAsync(new JoinMatchRequest
+            {
+                PlayerId = playerId,
+                LobbyServerId = _masterConnection.InstanceId,
+                SkillScore = 0, // TODO: 실력 점수 연동
+                GameType = gameType,
+            });
+
+            if (response.Success) return null;
+
+            _logger.LogWarning("매칭 대기 거부: {PlayerId} Reason={Reason} {Detail}", playerId, response.Reason, response.Detail);
+            return new MatchFailed { Reason = response.Reason, Detail = response.Detail };
+        }
+        catch (RpcException ex)
+        {
+            _logger.LogWarning(ex, "JoinMatch 호출 실패: {PlayerId}", playerId);
+            return new MatchFailed { Reason = MatchFailReason.MatchingServerUnavailable, Detail = ex.StatusCode.ToString() };
         }
     }
 
@@ -564,18 +598,19 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var playerId = context.UserState["playerId"] as string;
         if (string.IsNullOrEmpty(playerId))
         {
-            return new AddFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+            return new AddFriendResponse { Result = FriendResult.MissingCredentials };
         }
 
         try
         {
             var response = await _accountServer.AddFriendAsync(playerId, request.FriendPlayerId);
-            return new AddFriendResponse { Success = response.Success, ErrorMessage = response.ErrorMessage };
+            // 계정 서버의 결과를 그대로 전달한다(같은 FriendResult enum - common.proto).
+            return new AddFriendResponse { Result = response.Result, Detail = response.Detail };
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "AddFriend 요청 실패: {PlayerId}", playerId);
-            return new AddFriendResponse { Success = false, ErrorMessage = "일시적인 오류입니다." };
+            return new AddFriendResponse { Result = FriendResult.TemporaryFailure, Detail = ex.GetType().Name };
         }
     }
 
@@ -584,22 +619,22 @@ public sealed class LobbyControlService : LobbyControl.LobbyControlBase
         var playerId = context.UserState["playerId"] as string;
         if (string.IsNullOrEmpty(playerId))
         {
-            return new RemoveFriendResponse { Success = false, ErrorMessage = "인증 정보 없음" };
+            return new RemoveFriendResponse { Result = FriendResult.MissingCredentials };
         }
 
         try
         {
             var response = await _accountServer.RemoveFriendAsync(playerId, request.FriendPlayerId);
 
-            // 채팅 서버 통보는 AccountServer가 트랜잭션 아웃박스로 직접 처리한다
-            // (FriendEventOutbox → RabbitMQ → ChatServer.FriendRemovedSubscriber) -
-            // 로비는 여기서 그 흐름에 관여하지 않는다.
-            return new RemoveFriendResponse { Success = response.Success, ErrorMessage = response.ErrorMessage };
+            // 채팅 서버 통보는 AccountServer가 직접 처리한다
+            // (RabbitMqBroker → RabbitMQ → ChatServer.FriendRemovedSubscriber) -
+            // 로비는 여기서 그 흐름에 관여하지 않는다. 결과는 그대로 전달(같은 FriendResult enum).
+            return new RemoveFriendResponse { Result = response.Result, Detail = response.Detail };
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "RemoveFriend 요청 실패: {PlayerId}", playerId);
-            return new RemoveFriendResponse { Success = false, ErrorMessage = "일시적인 오류입니다." };
+            return new RemoveFriendResponse { Result = FriendResult.TemporaryFailure, Detail = ex.GetType().Name };
         }
     }
 }

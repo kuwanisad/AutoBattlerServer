@@ -1,5 +1,7 @@
+using MainServer.Common.MasterConnection;
 using Shared.Common;
 using Shared.Common.Account;
+using Shared.Common.Redis;
 
 namespace GameAgent.Services;
 
@@ -10,6 +12,15 @@ namespace GameAgent.Services;
 /// </summary>
 public sealed class IngameAgentMainServerIntermediary : MainServerIntermediary
 {
+    public IngameAgentMainServerIntermediary(
+        ISessionRegistry sessionRegistry,
+        MasterConnectionService masterConnection,
+        ILogger<IngameAgentMainServerIntermediary> logger)
+    {
+        // 로비→인게임 이동 중 티켓 TTL 안에 안 온 클라의 세션을 지운다(MainServerIntermediary 참고).
+        RemoveSessionOnTicketExpiry(sessionRegistry, () => masterConnection.InstanceId, logger);
+    }
+
     /// <summary>IngameControlService.RegisterIncomingTransfers RPC 핸들러가 호출.</summary>
     public void OnRegisterIncomingTransfersReceived(IEnumerable<(string PlayerId, string Ticket)> tickets) =>
         RegisterBatch(tickets);

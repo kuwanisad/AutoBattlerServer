@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+		테스트 하네스 에이전트(테스트 전용) - 서버 프로세스가 테스트 하네스에 접속해 디버그 명령을
+		받고 결과를 돌려준다. HARNESS_ADDRESS 환경 변수가 없으면(평소 실행) 아무것도 하지 않는다.
+		각 서버는 Program.cs에서 builder.Services.AddHarnessAgent() 한 줄만 부른다.
+		서버별 디버그 명령은 이 프로젝트가 아니라 각 서버 프로젝트의 Test/Harness 폴더에 둔다
+		(서버 내부를 들여다봐야 해서 - 여기 두면 이 프로젝트가 서버를 참조해야 한다).
+	-->
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+		<PackageReference Include="Grpc.Net.Client" Version="2.63.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Harness.Contracts\Harness.Contracts.csproj" />
+	</ItemGroup>
+
+</Project>

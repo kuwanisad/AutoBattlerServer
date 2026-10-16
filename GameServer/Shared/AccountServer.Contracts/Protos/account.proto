@@ -84,8 +84,8 @@ message AddFriendRequest {
 }
 
 message AddFriendResponse {
-  bool success = 1;
-  string error_message = 2;
+  FriendResult result = 1;  // common.proto
+  string detail = 2;        // 로그/디버그용 설명
 }
 
 message RemoveFriendRequest {
@@ -94,8 +94,8 @@ message RemoveFriendRequest {
 }
 
 message RemoveFriendResponse {
-  bool success = 1;
-  string error_message = 2;
+  FriendResult result = 1;  // common.proto
+  string detail = 2;        // 로그/디버그용 설명
 }
 
 // === 우편함 ===

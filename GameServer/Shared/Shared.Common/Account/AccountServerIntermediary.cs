@@ -86,7 +86,7 @@ public abstract class AccountServerIntermediary
     {
         if (string.IsNullOrEmpty(AccountServerAddress))
         {
-            return new AccountServer.AddFriendResponse { Success = false, ErrorMessage = "계정 서버 주소 없음" };
+            return new AccountServer.AddFriendResponse { Result = GameServer.Common.FriendResult.AccountServerUnavailable };
         }
 
         using var channel = GrpcChannelFactory.Create(AccountServerAddress);
@@ -102,7 +102,7 @@ public abstract class AccountServerIntermediary
     {
         if (string.IsNullOrEmpty(AccountServerAddress))
         {
-            return new AccountServer.RemoveFriendResponse { Success = false, ErrorMessage = "계정 서버 주소 없음" };
+            return new AccountServer.RemoveFriendResponse { Result = GameServer.Common.FriendResult.AccountServerUnavailable };
         }
 
         using var channel = GrpcChannelFactory.Create(AccountServerAddress);

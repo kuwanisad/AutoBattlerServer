@@ -51,8 +51,8 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
             });
         }
 
-        var availableSlots = serverInfo.Capacity - serverInfo.CurrentLoad;
-        if (availableSlots < request.PlayerIds.Count)
+        // 남은 자리 = 인게임 서버가 보고한 값 기준 + 수락했지만 아직 반영 안 된 예약분(GameServerInfo 참고).
+        if (!serverInfo.TryReserveSeats(request.PlayerIds.Count, out var availableSlots))
         {
             _logger.LogWarning("PrepareMatch 거부 - 수용 불가: {MatchId} (여유={Slots}, 요청={Count})",
                 request.MatchId, availableSlots, request.PlayerIds.Count);
@@ -65,12 +65,13 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
 
         // 수락 후, 실제 방 생성(게임 서버와의 비동기 왕복)은 백그라운드로 진행하고
         // 결과는 끝나는 대로 PrepareMatchResult로 따로 보고한다.
-        _ = ProcessOpenRoomAsync(request.MatchId, request.PlayerIds.ToList(), request.GameType);
+        _ = ProcessOpenRoomAsync(request.MatchId, request.PlayerIds.ToList(), request.GameType, serverInfo);
 
         return Task.FromResult(new PrepareMatchResponse { Accepted = true });
     }
 
-    private async Task ProcessOpenRoomAsync(string matchId, List<string> playerIds, GameServer.Common.GameType gameType)
+    private async Task ProcessOpenRoomAsync(
+        string matchId, List<string> playerIds, GameServer.Common.GameType gameType, GameServerInfo serverInfo)
     {
         bool success;
         string errorMessage = string.Empty;
@@ -94,6 +95,12 @@ public sealed class IngameMatchService : IngameMatchControl.IngameMatchControlBa
             success = false;
             errorMessage = ex.Message;
             _logger.LogWarning(ex, "방 생성 대기 실패: {MatchId}", matchId);
+        }
+        finally
+        {
+            // 성공했으면 인게임 서버가 RoomOpened보다 먼저 보낸 상태 보고에 이 인원이 이미 들어있고,
+            // 실패했으면 애초에 자리를 안 쓴다 - 어느 쪽이든 예약은 여기서 푼다.
+            serverInfo.ReleaseReservedSeats(playerIds.Count);
         }
 
         await ReportPrepareMatchResultAsync(matchId, success, errorMessage);

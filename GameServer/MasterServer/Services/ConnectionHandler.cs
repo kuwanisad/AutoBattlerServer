@@ -17,6 +17,7 @@ namespace MasterServer.Services;
 internal sealed class ConnectionHandler
 {
     private readonly InstanceRegistry _registry;
+    private readonly ActiveAnnouncements _activeAnnouncements;
     private readonly IServerAuthenticator _authenticator;
     private readonly RedisOptions _redisOptions;
     private readonly ILogger _logger;
@@ -28,11 +29,13 @@ internal sealed class ConnectionHandler
 
     internal ConnectionHandler(
         InstanceRegistry registry,
+        ActiveAnnouncements activeAnnouncements,
         IServerAuthenticator authenticator,
         RedisOptions redisOptions,
         ILogger logger)
     {
         _registry = registry;
+        _activeAnnouncements = activeAnnouncements;
         _authenticator = authenticator;
         _redisOptions = redisOptions;
         _logger = logger;
@@ -276,6 +279,23 @@ internal sealed class ConnectionHandler
         _logger.LogInformation(
             "세션 레지스트리 주소 전달: {InstanceId} ← {Address}",
             status.InstanceId, _redisOptions.ConnectionString);
+
+        // 켜져 있는 공지 중 이 인스턴스가 대상인 것을 다시 보낸다 - 공지를 켤 때 끊겨 있었거나
+        // 그 뒤에 처음 뜬 인스턴스도 같은 상태가 되도록(주소 정보를 다시 보내는 것과 같은 이유).
+        foreach (var announcementType in _activeAnnouncements.GetFor(status.InstanceId, status.ServerType))
+        {
+            if (_registry.Enqueue(status.InstanceId, new MasterMessage
+                {
+                    Instruction = new MasterServerInstruction
+                    {
+                        Announcement = new AnnouncementTask { AnnouncementType = announcementType, Active = true },
+                    },
+                }))
+            {
+                _logger.LogInformation("켜진 공지 재전송: {InstanceId} ← {AnnouncementType}",
+                    status.InstanceId, announcementType);
+            }
+        }
     }
 
     /// <summary>
@@ -294,14 +314,13 @@ internal sealed class ConnectionHandler
             .Where(i => i.ServerType != ServerType.Matching)
             .ToList();
 
-        foreach (var instance in recipients)
-        {
-            _registry.Enqueue(instance.InstanceId, message);
-        }
+        // 실패한 대상은 InstanceRegistry.Enqueue가 로그를 남긴다 - 재접속하면 HandleStatus가
+        // 현재 주소를 다시 보내므로 여기서 따로 재시도하지 않는다.
+        var report = _registry.EnqueueTo(recipients, message);
 
         _logger.LogInformation(
-            "매칭 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
-            matchingInstanceId, matchingAddress, recipients.Count);
+            "매칭 서버 등록: {InstanceId} ({Address}) - 메인 서버 통보: {Report}",
+            matchingInstanceId, matchingAddress, report);
     }
 
     /// <summary>매칭 서버와 같은 이유로 존재하는 계정 서버 버전. BroadcastMatchingServerAddress 참고.</summary>
@@ -316,14 +335,13 @@ internal sealed class ConnectionHandler
             .Where(i => i.ServerType != ServerType.Account)
             .ToList();
 
-        foreach (var instance in recipients)
-        {
-            _registry.Enqueue(instance.InstanceId, message);
-        }
+        // 실패한 대상은 InstanceRegistry.Enqueue가 로그를 남긴다 - 재접속하면 HandleStatus가
+        // 현재 주소를 다시 보내므로 여기서 따로 재시도하지 않는다.
+        var report = _registry.EnqueueTo(recipients, message);
 
         _logger.LogInformation(
-            "계정 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
-            accountInstanceId, accountAddress, recipients.Count);
+            "계정 서버 등록: {InstanceId} ({Address}) - 메인 서버 통보: {Report}",
+            accountInstanceId, accountAddress, report);
     }
 
     /// <summary>매칭 서버와 같은 이유로 존재하는 채팅 서버 버전. BroadcastMatchingServerAddress 참고.</summary>
@@ -338,14 +356,13 @@ internal sealed class ConnectionHandler
             .Where(i => i.ServerType != ServerType.Chat)
             .ToList();
 
-        foreach (var instance in recipients)
-        {
-            _registry.Enqueue(instance.InstanceId, message);
-        }
+        // 실패한 대상은 InstanceRegistry.Enqueue가 로그를 남긴다 - 재접속하면 HandleStatus가
+        // 현재 주소를 다시 보내므로 여기서 따로 재시도하지 않는다.
+        var report = _registry.EnqueueTo(recipients, message);
 
         _logger.LogInformation(
-            "채팅 서버 등록: {InstanceId} ({Address}) - 접속 중인 메인 서버 {Count}개에 통보",
-            chatInstanceId, chatAddress, recipients.Count);
+            "채팅 서버 등록: {InstanceId} ({Address}) - 메인 서버 통보: {Report}",
+            chatInstanceId, chatAddress, report);
     }
 
     private async Task SendLoopAsync(

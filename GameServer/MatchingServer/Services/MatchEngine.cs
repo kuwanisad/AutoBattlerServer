@@ -1,3 +1,4 @@
+using GameServer.Common;
 using MatchingServer;
 using MatchingServer.Registry;
 using Microsoft.Extensions.Logging;
@@ -36,7 +37,6 @@ public sealed class MatchEngine : IDisposable
     private readonly ConnectedServerRegistry _connectedServers;
     private ISessionRegistry _sessionRegistry;
     private ILogger<MatchEngine> _logger;
-    private readonly int _matchTimeoutSeconds;
 
     // 매칭 대기 중인 플레이어 목록: playerId → WaitingPlayer (Queued 단계)
     private readonly ConcurrentDictionary<string, WaitingPlayer> _playerPool = new();
@@ -62,21 +62,28 @@ public sealed class MatchEngine : IDisposable
         MatchCallbackClient callbackClient,
         ConnectedServerRegistry connectedServers,
         ISessionRegistry sessionRegistry,
-        ILogger<MatchEngine> logger,
-        int matchTimeoutSeconds = 30)
+        ILogger<MatchEngine> logger)
     {
         _callbackClient = callbackClient;
         _connectedServers = connectedServers;
         _sessionRegistry = sessionRegistry;
         _logger = logger;
-        _matchTimeoutSeconds = matchTimeoutSeconds;
 
         // 매칭 루프 시작
         _ = RunMatchLoopAsync(_cts.Token);
     }
 
-    public bool JoinMatch(string playerId, string lobbyServerId, int skillScore, GameServer.Common.GameType gameType)
+    /// <summary>대기열에 넣는다. 성공하면 null, 실패하면 그 사유를 돌려준다(로비가 클라에 MatchFailed로 전달).</summary>
+    public MatchFailReason? JoinMatch(string playerId, string lobbyServerId, int skillScore, GameServer.Common.GameType gameType)
     {
+        // 규칙이 없는 GameType(Unspecified/None/Deleted 포함)은 받지 않는다 - 받으면 매칭될 상대도
+        // 방도 없어서 타임아웃까지 기다리다 실패할 뿐이다.
+        if (!MatchingConstants.TryGetRule(gameType, out _))
+        {
+            _logger.LogWarning("매칭 대기 거부 - 지원하지 않는 GameType: {PlayerId} GameType={GameType}", playerId, gameType);
+            return MatchFailReason.UnsupportedGameType;
+        }
+
         var player = new WaitingPlayer
         {
             PlayerId = playerId,
@@ -89,11 +96,11 @@ public sealed class MatchEngine : IDisposable
         if (!_playerPool.TryAdd(playerId, player))
         {
             _logger.LogWarning("이미 대기 중인 플레이어: {PlayerId}", playerId);
-            return false;
+            return MatchFailReason.AlreadyQueued;
         }
 
-        _logger.LogInformation("매칭 대기 진입: {PlayerId}", playerId);
-        return true;
+        _logger.LogInformation("매칭 대기 진입: {PlayerId} GameType={GameType}", playerId, gameType);
+        return null;
     }
 
     /// <summary>
@@ -106,7 +113,7 @@ public sealed class MatchEngine : IDisposable
         if (_playerToMatch.TryGetValue(playerId, out var matchId) && TryClaimMatch(matchId, out var match))
         {
             _logger.LogInformation("매치 진행 중 플레이어 이탈: {PlayerId} (MatchId={MatchId})", playerId, matchId);
-            DisruptMatch(match!);
+            DisruptMatch(match!, MatchDisruption.PlayerLeft(playerId));
             return true;
         }
 
@@ -147,7 +154,7 @@ public sealed class MatchEngine : IDisposable
             {
                 _logger.LogWarning("게임 에이전트 연결 끊김으로 매치 중단: {MatchId} (ServerId={ServerId})",
                     match.MatchId, serverId);
-                DisruptMatch(match);
+                DisruptMatch(match, MatchDisruption.IngameServerDisconnected(serverId));
             }
         }
         else if (serverType == GameServer.Common.ServerType.Lobby)
@@ -178,7 +185,7 @@ public sealed class MatchEngine : IDisposable
             {
                 _logger.LogWarning("로비 연결 끊김으로 매치 중단: {MatchId} (LobbyServerId={ServerId})",
                     match.MatchId, serverId);
-                DisruptMatch(match);
+                DisruptMatch(match, MatchDisruption.LobbyDisconnected(serverId));
             }
         }
     }
@@ -245,27 +252,42 @@ public sealed class MatchEngine : IDisposable
     /// 선점된(=이미 _matches 등에서 제거된) 매치를 중단 처리한다. 지금까지 쌓인 되돌리기를
     /// 전부 실행하고, 생존자(끊긴 당사자가 아닌 나머지)를 대기열로 복귀시킨다.
     ///
+    /// 누가 "끊긴 당사자"인지는 호출자가 아니라 여기서 중단 사유(disruption)를 보고 정한다 -
+    /// 이탈한 플레이어, 죽은 로비 소속 플레이어는 대기열에도 넣지 않고 증발시킨다(넣으면 나중에
+    /// 다시 매칭돼서, 받을 사람 없는 방이 게임 에이전트에 준비된다). 게임 에이전트 끊김과
+    /// PrepareMatch 거부/실패는 플레이어 잘못이 아니므로 전원 복귀.
+    ///
     /// 로비에 확정 통보(NotifyLobbyConfirmed)를 이미 보냈는지 여부로 조용히/시끄럽게를 가른다 -
     /// PreparingRoom 단계(확정 통보 전)면 조용히, Crossing 단계(확정 통보 후)면 취소 통보를
     /// 보내야 하지만, Crossing 단계 자체가 아직 이 코드베이스에 없어서(TODO) 지금은 항상
     /// PreparingRoom만 여기 들어온다 - 실제로 Crossing이 생기면 match.Phase로 분기 추가 필요.
     /// </summary>
-    private void DisruptMatch(PendingMatch match)
+    private void DisruptMatch(PendingMatch match, MatchDisruption disruption)
     {
         match.Transaction.Rollback();
 
         foreach (var player in match.Players)
         {
+            if (disruption.IsDeparted(player))
+            {
+                _logger.LogInformation("매치 중단 - 끊긴 당사자라 대기열에 복귀시키지 않음: {PlayerId} (MatchId={MatchId}, {Disruption})",
+                    player.PlayerId, match.MatchId, disruption);
+                continue;
+            }
+
             _playerPool.TryAdd(player.PlayerId, new WaitingPlayer
             {
                 PlayerId = player.PlayerId,
                 LobbyServerId = player.LobbyServerId,
                 SkillScore = player.SkillScore,
-                JoinedAtUtc = DateTime.UtcNow, // 대기열 복귀 시점으로 갱신 - 타임아웃을 다시 잰다
+                GameType = match.GameType, // 예전엔 빠져 있어서 복귀한 플레이어가 기본 게임 타입으로 다시 매칭됐다
+                // 처음 대기열에 들어온 시각을 그대로 쓴다 - 예전엔 복귀할 때마다 지금 시각으로 갱신해서,
+                // PrepareMatch가 계속 거부되면 시도→거부→복귀를 끝없이 반복하고 타임아웃이 안 걸렸다.
+                JoinedAtUtc = player.JoinedAtUtc,
             });
 
-            _logger.LogInformation("매치 중단으로 대기열 복귀: {PlayerId} (MatchId={MatchId})",
-                player.PlayerId, match.MatchId);
+            _logger.LogInformation("매치 중단으로 대기열 복귀: {PlayerId} (MatchId={MatchId}, {Disruption})",
+                player.PlayerId, match.MatchId, disruption);
         }
 
         // TODO: match.Phase == Crossing이면 여기서 NotifyLobbyCancelled를 각 플레이어에게 보내야 함.
@@ -298,7 +320,7 @@ public sealed class MatchEngine : IDisposable
     }
 
     /// <summary>매칭 취소를 로비 서버에 통보한다. 로비가 접속돼 있지 않으면(연결 끊김 등) 조용히 건너뛴다.</summary>
-    private void NotifyLobbyCancelled(string playerId, string lobbyServerId, string reason)
+    private void NotifyLobbyCancelled(string playerId, string lobbyServerId, MatchFailReason reason, string detail = "")
     {
         if (!_connectedServers.IsConnected(lobbyServerId))
         {
@@ -315,6 +337,7 @@ public sealed class MatchEngine : IDisposable
                 {
                     PlayerId = playerId,
                     Reason = reason,
+                    Detail = detail,
                 },
             },
         });
@@ -346,7 +369,7 @@ public sealed class MatchEngine : IDisposable
             // PrepareMatch 자체가 실패한 경우 - 아직 로비에 "잡혔다"고 알린 적이 없으므로
             // (6번 이전) 조용히 대기열로 복귀시킨다. 취소 통보 없음.
             _logger.LogWarning("매치 준비 실패: {MatchId} - {Error}", matchId, errorMessage);
-            DisruptMatch(match!);
+            DisruptMatch(match!, MatchDisruption.PrepareFailed());
         }
 
         return Task.CompletedTask;
@@ -363,7 +386,7 @@ public sealed class MatchEngine : IDisposable
                 await TryMatchAsync();
                 CheckTimeouts();
 
-                await Task.Delay(1000, cancellationToken);
+                await Task.Delay(MatchingConstants.MatchLoopInterval, cancellationToken);
             }
         }
         catch (OperationCanceledException e)
@@ -376,39 +399,84 @@ public sealed class MatchEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// GameType별로 대기열을 나눠 본다 - 같은 GameType끼리만, 그 GameType 규칙(MatchingConstants)의
+    /// 정원만큼 모였을 때만 매치를 만든다(기본 규칙은 정원 충족 - 덜 모였으면 기다리고, 시간이 다
+    /// 되면 CheckTimeouts가 타임아웃으로 실패 처리). 대기열 자체는 playerId로 찾는 _playerPool
+    /// 하나를 GameType으로 묶어서 보는 방식이다 - 이탈/타임아웃/로비 끊김 처리가 playerId로
+    /// 찾아야 해서, 대기열을 GameType별 자료구조로 따로 두면 두 곳을 같이 맞춰야 한다.
+    /// GameType 하나당 루프 한 바퀴에 매치 하나씩 만든다.
+    /// TODO: 실력 점수 기반 매칭 알고리즘으로 교체(지금은 먼저 온 순서).
+    /// </summary>
     private async Task TryMatchAsync()
     {
-        // 더미: 플레이어가 1명 이상이고 수용 가능한 인게임 서버가 있으면 매칭
-        // TODO: 실력 점수 기반 매칭 알고리즘으로 교체
-        var players = _playerPool.Values.ToList();
-        if (players.Count == 0) return;
+        if (_playerPool.IsEmpty) return;
 
-        var ingameServer = await FindAvailableIngameServerAsync();
-        if (ingameServer == null) return;
+        var queues = _playerPool.Values
+            .GroupBy(p => p.GameType)
+            .ToList();
 
-        // 더미: 1명씩 매칭. 매치로 넘어가는 순간 대기열에서는 빠진다 - 로비 정보는
+        foreach (var queue in queues)
+        {
+            if (!MatchingConstants.TryGetRule(queue.Key, out var rule)) continue; // JoinMatch가 이미 거르므로 이론상 없음
+            if (queue.Count() < rule.RequiredPlayers) continue;
+
+            var ingameServer = await FindAvailableIngameServerAsync();
+            if (ingameServer == null) return; // 받을 인게임 서버가 없으면 다른 GameType도 못 잡는다
+
+            var picked = TakeFromPool(queue.OrderBy(p => p.JoinedAtUtc), rule.RequiredPlayers);
+            if (picked == null) continue; // 그 사이 이탈자가 생겨 정원이 깨짐 - 다음 바퀴에 다시
+
+            await StartMatchAsync(queue.Key, picked, ingameServer);
+        }
+    }
+
+    /// <summary>
+    /// 대기열에서 앞에서부터 count명을 뺀다. 빼는 도중 이미 이탈한 사람이 있어서 count명을 못
+    /// 채우면, 이번에 뺀 사람들을 원래대로 되돌리고 null을 돌려준다(정원 미달 매치를 만들지 않음).
+    /// </summary>
+    private List<WaitingPlayer>? TakeFromPool(IEnumerable<WaitingPlayer> candidates, int count)
+    {
+        var taken = new List<WaitingPlayer>(count);
+        foreach (var candidate in candidates)
+        {
+            if (taken.Count == count) break;
+            if (_playerPool.TryRemove(candidate.PlayerId, out var removed)) taken.Add(removed);
+        }
+
+        if (taken.Count == count) return taken;
+
+        foreach (var player in taken) _playerPool.TryAdd(player.PlayerId, player);
+        return null;
+    }
+
+    private async Task StartMatchAsync(
+        GameServer.Common.GameType gameType, List<WaitingPlayer> players, ConnectedServerInfo ingameServer)
+    {
+        // 매치로 넘어가는 순간 대기열에서는 빠진다 - 로비 정보와 처음 대기열에 들어온 시각은
         // PendingMatch.Players에 스냅샷으로 들고 있으므로 더 이상 _playerPool을 참조할 필요가 없다.
-        var player = players.First();
-        if (!_playerPool.TryRemove(player.PlayerId, out _)) return; // 그 사이 이미 이탈했으면 포기
-
         var matchId = Guid.NewGuid().ToString("N");
 
         var match = new PendingMatch
         {
             MatchId = matchId,
-            Players = new List<MatchPlayer>
+            Players = players.Select(p => new MatchPlayer
             {
-                new() { PlayerId = player.PlayerId, LobbyServerId = player.LobbyServerId, SkillScore = player.SkillScore },
-            },
+                PlayerId = p.PlayerId,
+                LobbyServerId = p.LobbyServerId,
+                SkillScore = p.SkillScore,
+                JoinedAtUtc = p.JoinedAtUtc,
+            }).ToList(),
             IngameServerId = ingameServer.ServerId,
             CreatedAtUtc = DateTime.UtcNow,
             Phase = MatchPhase.PreparingRoom,
-            GameType = player.GameType,
+            GameType = gameType,
         };
 
         RegisterMatch(match);
 
-        _logger.LogInformation("매치 시도: {MatchId} → {ServerId}", matchId, ingameServer.ServerId);
+        _logger.LogInformation("매치 시도: {MatchId} → {ServerId} (GameType={GameType}, {Count}명)",
+            matchId, ingameServer.ServerId, gameType, match.Players.Count);
 
         // 게임 에이전트에 PrepareMatch 요청 (단항 - 요청/응답이 필요하므로 스트림으로 안 옮김)
         var playerIds = match.Players.Select(p => p.PlayerId).ToList();
@@ -419,7 +487,7 @@ public sealed class MatchEngine : IDisposable
             if (TryClaimMatch(matchId, out var claimedMatch))
             {
                 _logger.LogWarning("PrepareMatch 거부: {MatchId}", matchId);
-                DisruptMatch(claimedMatch!);
+                DisruptMatch(claimedMatch!, MatchDisruption.PrepareRejected());
             }
             // TryClaimMatch가 실패했다면 그 사이 다른 경로(끊김)가 이미 정리한 것이므로 할 일 없음.
         }
@@ -449,7 +517,7 @@ public sealed class MatchEngine : IDisposable
 
     private void CheckTimeouts()
     {
-        var timeout = TimeSpan.FromSeconds(_matchTimeoutSeconds);
+        var timeout = MatchingConstants.MatchTimeout;
         var timedOut = _playerPool.Values
             .Where(p => DateTime.UtcNow - p.JoinedAtUtc > timeout)
             .ToList();
@@ -459,7 +527,7 @@ public sealed class MatchEngine : IDisposable
             _playerPool.TryRemove(player.PlayerId, out _);
             _logger.LogInformation("매칭 타임아웃: {PlayerId}", player.PlayerId);
 
-            NotifyLobbyCancelled(player.PlayerId, player.LobbyServerId, "매칭 시간 초과");
+            NotifyLobbyCancelled(player.PlayerId, player.LobbyServerId, MatchFailReason.Timeout);
         }
     }
 
@@ -468,6 +536,41 @@ public sealed class MatchEngine : IDisposable
         _cts.Cancel();
         _cts.Dispose();
     }
+}
+
+/// <summary>매치가 왜 중단됐는지 - DisruptMatch가 이걸 보고 누구를 대기열로 되돌릴지 정한다.</summary>
+public enum MatchDisruptReason
+{
+    PlayerLeft,                // 플레이어가 이탈/매칭 취소(LeaveMatch) - 그 플레이어만 증발
+    LobbyDisconnected,         // 로비 서버 연결 끊김 - 그 로비 소속 전원 증발
+    IngameServerDisconnected,  // 게임 에이전트 연결 끊김 - 전원 복귀
+    PrepareRejected,           // 게임 에이전트가 PrepareMatch를 거부 - 전원 복귀
+    PrepareFailed,             // 방 준비 실패 응답 - 전원 복귀
+}
+
+/// <summary>
+/// 중단 사유 + 그 사유의 대상 ID(이탈한 playerId, 끊긴 lobbyServerId, 끊긴 게임 에이전트 serverId).
+/// 사유 열거형만으로는 "누가" 끊겼는지 알 수 없어서 대상 ID를 함께 묶었다 - 생성은 사유별
+/// 팩토리로만 해서 사유와 ID 종류가 어긋나지 않게 한다.
+/// </summary>
+public readonly record struct MatchDisruption(MatchDisruptReason Reason, string SubjectId)
+{
+    public static MatchDisruption PlayerLeft(string playerId) => new(MatchDisruptReason.PlayerLeft, playerId);
+    public static MatchDisruption LobbyDisconnected(string lobbyServerId) => new(MatchDisruptReason.LobbyDisconnected, lobbyServerId);
+    public static MatchDisruption IngameServerDisconnected(string serverId) => new(MatchDisruptReason.IngameServerDisconnected, serverId);
+    public static MatchDisruption PrepareRejected() => new(MatchDisruptReason.PrepareRejected, string.Empty);
+    public static MatchDisruption PrepareFailed() => new(MatchDisruptReason.PrepareFailed, string.Empty);
+
+    /// <summary>이 플레이어가 중단의 당사자라 대기열로 되돌리면 안 되는지.</summary>
+    public bool IsDeparted(MatchPlayer player) => Reason switch
+    {
+        MatchDisruptReason.PlayerLeft => player.PlayerId == SubjectId,
+        MatchDisruptReason.LobbyDisconnected => player.LobbyServerId == SubjectId,
+        _ => false,
+    };
+
+    public override string ToString() =>
+        string.IsNullOrEmpty(SubjectId) ? Reason.ToString() : $"{Reason}:{SubjectId}";
 }
 
 /// <summary>매치가 지금 어느 단계인지. 되돌릴 방법(Transaction)과 무관하게 "정책 선택"에만 쓴다.</summary>
@@ -495,6 +598,9 @@ public sealed class MatchPlayer
     public string PlayerId { get; init; } = string.Empty;
     public string LobbyServerId { get; init; } = string.Empty;
     public int SkillScore { get; init; }
+
+    /// <summary>처음 대기열에 들어온 시각 - 매치가 중단돼 대기열로 돌아갈 때 그대로 되살린다.</summary>
+    public DateTime JoinedAtUtc { get; init; }
 }
 
 public sealed class PendingMatch

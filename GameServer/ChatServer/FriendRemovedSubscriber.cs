@@ -1,5 +1,5 @@
 using System.Text.Json;
-using MainServer.Common.Messaging;
+using Shared.Common.Messaging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -16,25 +16,25 @@ internal sealed class FriendRemovedEvent
 
 /// <summary>
 /// AccountServer가 발행하는 "friend-removed" 큐를 구독해서, 삭제된 두 사람의 둘만의
-/// 채팅방을 실제로 정리한다. RabbitMqConsumer의 수동 ack 방식을 그대로 쓴다 - 처리(방
+/// 채팅방을 실제로 정리한다. RabbitMqBroker 구독의 수동 ack 방식을 쓴다 - 처리(방
 /// 삭제)가 확실히 끝나야만 ack를 보내고, 실패하면 재큐잉돼서 나중에 다시 시도된다.
 /// </summary>
 public sealed class FriendRemovedSubscriber : IHostedService
 {
     private const string FriendRemovedQueueName = "friend-removed";
 
-    private readonly RabbitMqConsumer _consumer;
+    private readonly RabbitMqBroker _broker;
     private readonly IChatRoomStore _roomStore;
     private readonly ChatConnectionRegistry _connections;
     private readonly ILogger<FriendRemovedSubscriber> _logger;
 
     public FriendRemovedSubscriber(
-        RabbitMqConsumer consumer,
+        RabbitMqBroker broker,
         IChatRoomStore roomStore,
         ChatConnectionRegistry connections,
         ILogger<FriendRemovedSubscriber> logger)
     {
-        _consumer = consumer;
+        _broker = broker;
         _roomStore = roomStore;
         _connections = connections;
         _logger = logger;
@@ -42,7 +42,9 @@ public sealed class FriendRemovedSubscriber : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _consumer.Subscribe(FriendRemovedQueueName, HandleAsync);
+        // 등록만 한다 - 실제 구독은 RabbitMqBroker가 접속/재접속될 때마다 연다(RabbitMQ가 아직 없어도
+        // 서버 시작을 막지 않음). 처리 실패 시 재큐잉(예전 RabbitMqConsumer와 같은 동작).
+        _broker.Subscribe(FriendRemovedQueueName, HandleAsync, new RabbitMqSubscribeOptions { RequeueOnFailure = true });
         return Task.CompletedTask;
     }
 

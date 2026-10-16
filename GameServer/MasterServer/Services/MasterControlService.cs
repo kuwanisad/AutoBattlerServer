@@ -12,11 +12,12 @@ public sealed class MasterControlService : MasterControl.MasterControlBase
 
     public MasterControlService(
         InstanceRegistry registry,
+        ActiveAnnouncements activeAnnouncements,
         IServerAuthenticator authenticator,
         IOptions<RedisOptions> redisOptions,
         ILogger<MasterControlService> logger)
     {
-        _connectionHandler = new ConnectionHandler(registry, authenticator, redisOptions.Value, logger);
+        _connectionHandler = new ConnectionHandler(registry, activeAnnouncements, authenticator, redisOptions.Value, logger);
     }
 
     public override Task Connect(

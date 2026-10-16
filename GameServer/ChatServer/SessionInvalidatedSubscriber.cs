@@ -1,5 +1,4 @@
 using System.Text.Json;
-using MainServer.Common.Messaging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Shared.Common.Messaging;
@@ -19,23 +18,25 @@ namespace ChatServer;
 /// </summary>
 public sealed class SessionInvalidatedSubscriber : IHostedService
 {
-    private readonly RabbitMqConsumer _consumer;
+    private readonly RabbitMqBroker _broker;
     private readonly ChatConnectionRegistry _connections;
     private readonly ILogger<SessionInvalidatedSubscriber> _logger;
 
     public SessionInvalidatedSubscriber(
-        RabbitMqConsumer consumer,
+        RabbitMqBroker broker,
         ChatConnectionRegistry connections,
         ILogger<SessionInvalidatedSubscriber> logger)
     {
-        _consumer = consumer;
+        _broker = broker;
         _connections = connections;
         _logger = logger;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _consumer.Subscribe(SessionInvalidatedEvent.QueueName, HandleAsync);
+        // 등록만 한다 - 실제 구독은 RabbitMqBroker가 접속/재접속될 때마다 연다(RabbitMQ가 아직 없어도
+        // 서버 시작을 막지 않음). 처리 실패 시 재큐잉(예전 RabbitMqConsumer와 같은 동작).
+        _broker.Subscribe(SessionInvalidatedEvent.QueueName, HandleAsync, new RabbitMqSubscribeOptions { RequeueOnFailure = true });
         return Task.CompletedTask;
     }
 

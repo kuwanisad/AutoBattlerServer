@@ -62,7 +62,8 @@ message MatchConfirmed {
 
 message MatchCancelled {
   string player_id = 1;
-  string reason = 2;  // 취소 사유 (타임아웃 등)
+  MatchFailReason reason = 2;  // 취소 사유(common.proto) - 로비가 MatchFailed로 그대로 클라에 전달한다
+  string detail = 3;           // 로그/디버그용 설명
 }
 
 // =====================
@@ -86,7 +87,9 @@ message JoinMatchRequest {
 
 message JoinMatchResponse {
   bool success = 1;
-  string error_message = 2;
+  reserved 2;                 // 예전 string error_message - 사유는 reason 열거형으로 대체
+  MatchFailReason reason = 3; // success=false일 때 - 로비가 클라에 MatchFailed로 그대로 전달 (common.proto)
+  string detail = 4;          // 로그/디버그용 설명
 }
 
 message LeaveMatchRequest {

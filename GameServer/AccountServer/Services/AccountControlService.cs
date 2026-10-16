@@ -1,6 +1,8 @@
+using GameServer.Common;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
 using Shared.Common.Auth;
+using Shared.Common.Messaging;
 
 namespace AccountServer.Services;
 
@@ -15,7 +17,7 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
     private const int MaxPlayerIdRetries = 5;
 
     private readonly IAccountRepository _repository;
-    private readonly FriendEventOutbox _outbox;
+    private readonly RabbitMqBroker _rabbitMq;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IMailRepository _mailRepository;
     private readonly MailboxEvictor _mailboxEvictor;
@@ -23,14 +25,14 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
 
     public AccountControlService(
         IAccountRepository repository,
-        FriendEventOutbox outbox,
+        RabbitMqBroker rabbitMq,
         IPasswordHasher passwordHasher,
         IMailRepository mailRepository,
         MailboxEvictor mailboxEvictor,
         ILogger<AccountControlService> logger)
     {
         _repository = repository;
-        _outbox = outbox;
+        _rabbitMq = rabbitMq;
         _passwordHasher = passwordHasher;
         _mailRepository = mailRepository;
         _mailboxEvictor = mailboxEvictor;
@@ -151,11 +153,11 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         var success = await _repository.AddFriendAsync(request.PlayerId, request.FriendPlayerId);
         if (!success)
         {
-            return new AddFriendResponse { Success = false, ErrorMessage = "계정을 찾을 수 없습니다." };
+            return new AddFriendResponse { Result = FriendResult.AccountNotFound };
         }
 
         _logger.LogInformation("친구 추가: {PlayerId} ↔ {FriendPlayerId}", request.PlayerId, request.FriendPlayerId);
-        return new AddFriendResponse { Success = true };
+        return new AddFriendResponse { Result = FriendResult.Ok };
     }
 
     public override async Task<RemoveFriendResponse> RemoveFriend(
@@ -164,21 +166,21 @@ public sealed class AccountControlService : AccountControl.AccountControlBase
         var success = await _repository.RemoveFriendAsync(request.PlayerId, request.FriendPlayerId);
         if (!success)
         {
-            return new RemoveFriendResponse { Success = false, ErrorMessage = "계정을 찾을 수 없습니다." };
+            return new RemoveFriendResponse { Result = FriendResult.AccountNotFound };
         }
 
-        // 친구 목록 갱신(위 RemoveFriendAsync)과 이벤트를 아웃박스에 넣는 것을 최대한
-        // 붙여서 처리한다 - 둘 다 순수 인메모리 연산이라, 그 사이 프로세스가 죽을
-        // 위험 구간이 극히 짧다(트랜잭션 아웃박스 패턴 - 실제 RabbitMQ 발행이라는
-        // 네트워크 I/O는 별도 백그라운드 서비스(FriendEventPublisher)가 맡는다).
-        _outbox.Enqueue(new FriendRemovedEvent
+        // 친구 목록 갱신(위 RemoveFriendAsync)과 이벤트 발행 요청을 최대한 붙여서 처리한다 -
+        // PublishToQueue는 RabbitMqBroker의 버퍼에 넣기만 하는 순수 인메모리 연산이라, 그 사이 프로세스가
+        // 죽을 위험 구간이 극히 짧다(트랜잭션 아웃박스 패턴). 실제 발행(네트워크 I/O)과 "브로커 확인을
+        // 받아야만 버퍼에서 뺀다"는 RabbitMqBroker가 맡는다 - 예전 FriendEventOutbox/FriendEventPublisher를 대체.
+        _rabbitMq.PublishToQueue(FriendRemovedEvent.QueueName, System.Text.Json.JsonSerializer.Serialize(new FriendRemovedEvent
         {
             PlayerId = request.PlayerId,
             FriendPlayerId = request.FriendPlayerId,
-        });
+        }));
 
         _logger.LogInformation("친구 삭제: {PlayerId} ↔ {FriendPlayerId}", request.PlayerId, request.FriendPlayerId);
-        return new RemoveFriendResponse { Success = true };
+        return new RemoveFriendResponse { Result = FriendResult.Ok };
     }
 
     // === 우편함 ===

@@ -23,13 +23,20 @@ public sealed class LobbyMatchService : LobbyMatchControl.LobbyMatchControlBase
 
     public override Task<JoinMatchResponse> JoinMatch(JoinMatchRequest request, ServerCallContext context)
     {
-        var success = _matchEngine.JoinMatch(
+        var failReason = _matchEngine.JoinMatch(
             request.PlayerId,
             request.LobbyServerId,
             request.SkillScore,
             request.GameType);
 
-        return Task.FromResult(new JoinMatchResponse { Success = success });
+        return Task.FromResult(failReason == null
+            ? new JoinMatchResponse { Success = true }
+            : new JoinMatchResponse
+            {
+                Success = false,
+                Reason = failReason.Value,
+                Detail = $"game_type={request.GameType}",
+            });
     }
 
     public override Task<LeaveMatchResponse> LeaveMatch(LeaveMatchRequest request, ServerCallContext context)

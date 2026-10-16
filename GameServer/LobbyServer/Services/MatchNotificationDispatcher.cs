@@ -1,3 +1,4 @@
+using GameServer.Common;
 using System.Collections.Concurrent;
 using Grpc.Core;
 using LobbyServer;
@@ -93,7 +94,7 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
 
                 await pending.Stream.WriteAsync(new MatchEvent
                 {
-                    MatchFailed = new MatchFailed { Reason = "매칭 서버 연결 끊김" },
+                    MatchFailed = new MatchFailed { Reason = MatchFailReason.MatchingServerDisconnected },
                 });
             }
             catch (Exception ex)
@@ -206,7 +207,8 @@ public sealed class MatchNotificationDispatcher : IMatchNotificationHandler
 
             await pending.Stream.WriteAsync(new MatchEvent
             {
-                MatchFailed = new MatchFailed { Reason = notification.Cancelled.Reason },
+                // 매칭 서버가 보낸 사유를 그대로 전달한다(같은 MatchFailReason enum - common.proto).
+                MatchFailed = new MatchFailed { Reason = notification.Cancelled.Reason, Detail = notification.Cancelled.Detail },
             });
 
             _logger.LogInformation("매칭 취소 전달: {PlayerId} ({Reason})", playerId, notification.Cancelled.Reason);

@@ -1,3 +1,4 @@
+using Harness.Agent;
 using Confluent.Kafka;
 using LobbyServer.Auth;
 using LobbyServer.Services;
@@ -6,6 +7,7 @@ using Shared.Common.Hosting;
 using MainServer.Common.MasterConnection;
 using MainServer.Common.MatchConnection;
 using MainServer.Common.Messaging;
+using Shared.Common.Messaging;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Shared.Common.Auth;
 using Shared.Common.Auth.Debug;
@@ -60,6 +62,9 @@ builder.Services.AddGrpc(options =>
 });
 builder.Services.AddScoped<LobbyControlService>();
 
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
+
 var app = builder.Build();
 
 // 로비 서버는 시작하자마자 개방 - 인게임 서버와 달리 별도 준비 단계가 없다.
@@ -78,7 +83,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
 app.MapGrpcService<LobbyControlService>();
 app.MapGet("/", () => "Lobby Server.");
 
-// curl -X POST "http://localhost:5201/test/kafka?topic=game-events&message=hello"
+// curl -k -X POST "https://localhost:5201/test/kafka?topic=game-events&message=hello"
 app.MapPost("/test/kafka", async (
     KafkaProducer<string, string> producer,
     string topic,
@@ -92,24 +97,24 @@ app.MapPost("/test/kafka", async (
     return Results.Ok($"Kafka 발행 완료: topic={topic} message={message}");
 });
 
-// curl -X POST "http://localhost:5201/test/rabbitmq/queue?queue=reward-queue&message=hello"
+// curl -k -X POST "https://localhost:5201/test/rabbitmq/queue?queue=reward-queue&message=hello"
 app.MapPost("/test/rabbitmq/queue", (
-    RabbitMqProducer producer,
+    RabbitMqBroker broker,
     string queue,
     string message) =>
 {
-    producer.PublishToQueue(queue, message);
-    return Results.Ok($"RabbitMQ 발행 완료: queue={queue} message={message}");
+    broker.PublishToQueue(queue, message);
+    return Results.Ok($"RabbitMQ 발행 요청(버퍼에 넣음 - 연결돼 있으면 바로 발행): queue={queue} message={message}");
 });
 
-// curl -X POST "http://localhost:5201/test/rabbitmq/fanout?exchange=ops-announcements&message=hello"
+// curl -k -X POST "https://localhost:5201/test/rabbitmq/fanout?exchange=ops-announcements&message=hello"
 app.MapPost("/test/rabbitmq/fanout", (
-    RabbitMqProducer producer,
+    RabbitMqBroker broker,
     string exchange,
     string message) =>
 {
-    producer.PublishToFanout(exchange, message);
-    return Results.Ok($"RabbitMQ fanout 발행 완료: exchange={exchange} message={message}");
+    broker.PublishToFanout(exchange, message);
+    return Results.Ok($"RabbitMQ fanout 발행 요청(버퍼에 넣음 - 연결돼 있으면 바로 발행): exchange={exchange} message={message}");
 });
 
 app.Run();

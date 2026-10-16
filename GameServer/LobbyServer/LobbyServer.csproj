@@ -11,6 +11,7 @@
 		<PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
 		<ProjectReference Include="..\Shared\LobbyServer.Contracts\LobbyServer.Contracts.csproj" />
 		<ProjectReference Include="..\Shared\Shared.Common\Shared.Common.csproj" />
+		<ProjectReference Include="..\Shared\Test\Harness.Agent\Harness.Agent.csproj" />
 		<ProjectReference Include="..\Shared\MatchingServer.Contracts\MatchingServer.Contracts.csproj" />
 		<ProjectReference Include="..\Shared\AccountServer.Contracts\AccountServer.Contracts.csproj" />
 	</ItemGroup>

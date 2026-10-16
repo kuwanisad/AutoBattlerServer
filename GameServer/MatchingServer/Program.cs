@@ -1,3 +1,4 @@
+using Harness.Agent;
 using MainServer.Common.Heartbeat;
 using MainServer.Common.MasterConnection;
 using MatchingServer.Registry;
@@ -28,18 +29,21 @@ builder.Services.AddHostedService<ServerHeartbeatService>();
 builder.Services.AddSingleton<ConnectedServerRegistry>();
 
 // 매칭 서버 핵심 서비스
-var matchTimeoutSeconds = builder.Configuration.GetValue<int>("MatchingServer:MatchTimeoutSeconds", 30);
+// 매칭 타임아웃/루프 간격/GameType별 정원은 MatchingConstants에 있다(예전 설정 키 MatchingServer:MatchTimeoutSeconds는
+// 실제로 설정한 곳이 없어서 제거).
 builder.Services.AddSingleton<MatchCallbackClient>();
 builder.Services.AddSingleton(sp =>
     new MatchEngine(
         sp.GetRequiredService<MatchCallbackClient>(),
         sp.GetRequiredService<ConnectedServerRegistry>(),
         sp.GetRequiredService<ISessionRegistry>(),
-        sp.GetRequiredService<ILogger<MatchEngine>>(),
-        matchTimeoutSeconds));
+        sp.GetRequiredService<ILogger<MatchEngine>>()));
 
 // gRPC
 builder.Services.AddGrpc();
+
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 

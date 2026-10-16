@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using Shared.Common.Redis;
 
 namespace Shared.Common.Account;
 
@@ -22,6 +24,43 @@ public abstract class MainServerIntermediary
     /// <summary>티켓 만료(=그 시간 안에 클라가 안 옴) 시 서버마다 다른 정리 로직을 위임받는다 -
     /// 이 클래스는 "언제"만 판단하고 "무엇을"은 모른다.</summary>
     public event Action<string>? OnTicketExpired;
+
+    /// <summary>
+    /// 티켓 만료 시 그 플레이어의 세션을 세션 레지스트리에서 지우도록 연결한다(받는 쪽 서버가
+    /// 생성자에서 호출). 시간 안에 안 온 클라의 세션이 "이동 중 + 소유자 = 이 서버"로 영원히 남으면,
+    /// 그 클라가 로그인 서버로 재진입할 때마다 이 서버로 다시 안내돼 티켓 없이 거부되는 루프에 빠진다 -
+    /// 지우면 로그인 서버가 "살아있는 세션 없음"으로 거부해서 처음부터 다시 로그인하게 된다.
+    /// 지우기 직전에 "아직 이동 중이고 소유자가 나"인지 다시 확인한다 - 그 사이 다른 경로로
+    /// 상태가 바뀐 세션은 건드리지 않는다.
+    /// </summary>
+    protected void RemoveSessionOnTicketExpiry(ISessionRegistry sessionRegistry, Func<string> selfServerId, ILogger logger)
+    {
+        OnTicketExpired += playerId => _ = RemoveIfStillTransferringAsync(playerId);
+
+        async Task RemoveIfStillTransferringAsync(string playerId)
+        {
+            try
+            {
+                var session = await sessionRegistry.GetAsync(playerId);
+                if (session == null) return;
+
+                if (session.Status != PlayerStatus.Moving || session.OwnerServerId != selfServerId())
+                {
+                    logger.LogInformation("전입 티켓 만료 - 세션 상태가 이미 바뀌어 그대로 둠: {PlayerId} Status={Status} Owner={Owner}",
+                        playerId, session.Status, session.OwnerServerId);
+                    return;
+                }
+
+                await sessionRegistry.RemoveAsync(playerId);
+                logger.LogWarning("전입 티켓 만료 - 시간 안에 도착하지 않아 세션 삭제: {PlayerId} (TTL={Ttl}초)",
+                    playerId, TicketTtl.TotalSeconds);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "전입 티켓 만료 처리 실패: {PlayerId}", playerId);
+            }
+        }
+    }
 
     // === 받는 쪽 ===
 
@@ -51,21 +90,34 @@ public abstract class MainServerIntermediary
     }
 
     /// <summary>클라가 실제로 도착해서 EnterLobby/ConnectionApproval을 부를 때 호출한다.
-    /// 원자적으로 1회만 통과(성공/실패 상관없이 즉시 제거 - 재사용 방지).</summary>
+    /// 맞는 티켓이면 원자적으로 1회만 통과하고 즉시 제거한다(재사용 방지). 틀린 티켓이면 거부만
+    /// 하고 진짜 티켓은 TTL까지 남겨둔다.</summary>
     public bool TryConsume(string playerId, string submittedTicket)
     {
-        if (_pending.TryRemove(playerId, out var pending))
+        if (!_pending.TryGetValue(playerId, out var pending))
         {
-            return pending.Ticket == submittedTicket && DateTime.UtcNow < pending.ExpiresAt;
+            return false; // 애초에 등록된 적 없거나, 이미 소비됐거나, 이미 만료돼서 지워짐
         }
-        return false; // 애초에 등록된 적 없거나, 이미 소비됐거나, 이미 만료돼서 지워짐
+
+        if (pending.Ticket != submittedTicket || DateTime.UtcNow >= pending.ExpiresAt)
+        {
+            // 틀린 티켓으로는 진짜 티켓을 지우지 않는다 - 예전엔 맞든 틀리든 일단 꺼내서 지웠는데,
+            // 그러면 티켓 없이 들어온 재시도(로그인 서버 재진입 경로는 빈 티켓으로 접속함) 한 번에
+            // 진짜 티켓이 사라지고, 그 바람에 만료 이벤트(ExpireAfterTtlAsync)도 안 와서 세션이
+            // "이동 중 + 소유자 = 이 서버"로 영원히 남았다(재진입할 때마다 거부되는 무한 루프).
+            // 티켓은 무작위 GUID라 TTL(10초) 안에 맞혀볼 수 있는 값이 아니어서, 틀린 시도를 남겨둬도
+            // 위험은 사실상 없다.
+            return false;
+        }
+
+        // 맞는 티켓은 정확히 그 인스턴스일 때만 지운다 - 동시에 들어온 두 요청 중 하나만 통과(재사용 방지).
+        return _pending.TryRemove(new KeyValuePair<string, PendingTicket>(playerId, pending));
     }
 
-    /// <summary>이 플레이어 앞으로 등록된 티켓이 지금 있는지만 확인한다(소비 안 함,
-    /// 부작용 없음) - "티켓 검증이 필요한 상황인지"를 판단하는 용도. 로비→인게임
-    /// 정상 전환이면 IssueAndNotifyAsync가 미리 등록해뒀을 테니 있어야 하고, 같은
-    /// 서버로의 재접속이면 애초에 등록된 적이 없으니 없는 게 정상이다 - 그 경우까지
-    /// TryConsume을 강제하면 재접속을 막아버린다.</summary>
+    /// <summary>이 플레이어 앞으로 등록된 티켓이 지금 있는지만 확인한다(소비 안 함, 부작용 없음).
+    /// "티켓 검증이 필요한 상황인지"를 이걸로 판단하면 안 된다 - 티켓은 TTL이 지나면 지워지므로,
+    /// 만료된 이동이 "티켓이 필요 없는 재접속"과 구분되지 않는다. 검증 필요 여부는 세션 상태
+    /// (Status == Moving + OwnerServerId == 이 서버)로 판단하고, 이 메서드는 로그/진단용으로만 쓴다.</summary>
     public bool HasPendingTicket(string playerId) => _pending.ContainsKey(playerId);
 
     // === 보내는 쪽 ===

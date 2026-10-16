@@ -10,6 +10,7 @@
 		<PackageReference Include="Grpc.AspNetCore" Version="2.63.0" />
 		<ProjectReference Include="..\Shared\MasterServer.Contracts\MasterServer.Contracts.csproj" />
 		<ProjectReference Include="..\Shared\Shared.Common\Shared.Common.csproj" />
+		<ProjectReference Include="..\Shared\Test\Harness.Agent\Harness.Agent.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

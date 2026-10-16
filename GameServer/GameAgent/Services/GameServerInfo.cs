@@ -21,11 +21,47 @@ public sealed class GameServerInfo
     /// <summary>게임 서버가 준비 완료를 알렸는지 여부.</summary>
     public bool IsReady { get; set; }
 
-    /// <summary>현재 활성 매치 수.</summary>
+    /// <summary>
+    /// 지금 차지된 자리 수 - 인게임 서버(Unity)가 세서 GameServerStatus로 보낸 값을 그대로 저장한다.
+    /// 게임 에이전트는 직접 더하거나 빼지 않는다(예전엔 PlayerJoined/Left로 직접 셌는데, 정상 종료된
+    /// 방의 인원을 빼는 경로가 없어서 부하가 영구히 쌓였다).
+    /// </summary>
     public int CurrentLoad { get; set; }
 
-    /// <summary>수용 가능한 최대 매치 수.</summary>
+    /// <summary>수용 가능한 최대 자리 수(CurrentLoad와 같은 단위).</summary>
     public int Capacity { get; set; }
+
+    // PrepareMatch를 수락했지만 아직 인게임 서버의 보고에 반영되지 않은 자리 수.
+    // 인게임 서버는 OpenRoom을 받아 응접실을 만들 때 그 인원을 임시로 잡고 RoomOpened보다
+    // 먼저 상태를 보내므로(같은 스트림이라 순서 보장), RoomOpened를 받은 시점에 여기서 뺀다.
+    // 이게 없으면 수락~응접실 생성 사이에 들어온 PrepareMatch가 정원을 넘겨 수락될 수 있다.
+    private readonly object _reservationLock = new();
+    private int _pendingReservedSeats;
+
+    /// <summary>
+    /// 자리가 남으면 count만큼 예약하고 true. 남은 자리 = Capacity - (보고된 CurrentLoad + 예약 중).
+    /// 동시에 들어온 PrepareMatch 둘이 같은 빈자리를 보고 둘 다 수락하지 않게 락 안에서 판단한다.
+    /// </summary>
+    public bool TryReserveSeats(int count, out int availableSeats)
+    {
+        lock (_reservationLock)
+        {
+            availableSeats = Capacity - CurrentLoad - _pendingReservedSeats;
+            if (availableSeats < count) return false;
+
+            _pendingReservedSeats += count;
+            return true;
+        }
+    }
+
+    /// <summary>예약을 푼다 - 방 생성 결과(성공이든 실패든)를 받은 뒤에 부른다.</summary>
+    public void ReleaseReservedSeats(int count)
+    {
+        lock (_reservationLock)
+        {
+            _pendingReservedSeats = Math.Max(0, _pendingReservedSeats - count);
+        }
+    }
 
     // clientId → playerId 매핑
     // ConnectionApproval 승인 후 PlayerJoined/PlayerLeft에서 playerId를 참조할 때 사용한다.

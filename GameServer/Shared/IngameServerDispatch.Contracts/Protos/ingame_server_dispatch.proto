@@ -65,7 +65,7 @@ message ClientRedirectDisconnect {
 
 message ClientApprovalResolved {
   uint64 client_id = 1;
-  bool approved = 2;
-  string reason = 3;
+  ApprovalDecision decision = 2;  // ingame.proto - APPROVED가 아니면 거부
+  string detail = 3;              // 로그/디버그용 설명
   string new_token = 4;
 }

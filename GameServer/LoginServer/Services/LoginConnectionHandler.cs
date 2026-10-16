@@ -74,7 +74,7 @@ internal sealed class LoginConnectionHandler
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogInformation("계정 정보 제출 시간 초과: {Peer}", context.Peer);
-            await TrySendRejectedAsync(responseStream, "TIMEOUT", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.Timeout, cancellationToken);
             return;
         }
         catch (OperationCanceledException)
@@ -95,7 +95,7 @@ internal sealed class LoginConnectionHandler
             if (string.IsNullOrEmpty(createRequest.AccountId) || string.IsNullOrEmpty(createRequest.Password) ||
                 string.IsNullOrEmpty(createRequest.Nickname))
             {
-                await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+                await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidCredentials, cancellationToken);
                 return;
             }
 
@@ -103,7 +103,7 @@ internal sealed class LoginConnectionHandler
             var newPlayerId = await ResolveNewAccountAsync(createRequest, cancellationToken);
             if (newPlayerId == null)
             {
-                await TrySendRejectedAsync(responseStream, "ACCOUNT_CREATION_FAILED", cancellationToken);
+                await TrySendRejectedAsync(responseStream, LoginRejectReason.AccountCreationFailed, cancellationToken);
                 return;
             }
 
@@ -117,7 +117,7 @@ internal sealed class LoginConnectionHandler
         if (requestStream.Current.PayloadCase != ClientToLoginMessage.PayloadOneofCase.Credentials)
         {
             _logger.LogWarning("첫 메시지가 Credentials/Reconnect/CreateAccount가 아님: {Peer}", context.Peer);
-            await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidCredentials, cancellationToken);
             return;
         }
 
@@ -125,7 +125,7 @@ internal sealed class LoginConnectionHandler
 
         if (string.IsNullOrEmpty(credentials.AccountId) || string.IsNullOrEmpty(credentials.Password))
         {
-            await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidCredentials, cancellationToken);
             return;
         }
 
@@ -133,7 +133,7 @@ internal sealed class LoginConnectionHandler
         var playerId = await ResolvePlayerIdAsync(credentials, cancellationToken);
         if (playerId == null)
         {
-            await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidCredentials, cancellationToken);
             return;
         }
 
@@ -180,7 +180,7 @@ internal sealed class LoginConnectionHandler
         {
             _logger.LogInformation("세션 충돌로 로그인 거부: {PlayerId} (기존 소유자 {Owner})",
                 playerId, claimResult.PreviousOwner?.ServerId);
-            await TrySendRejectedAsync(responseStream, "SESSION_CONFLICT", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.SessionConflict, cancellationToken);
             return;
         }
 
@@ -189,7 +189,7 @@ internal sealed class LoginConnectionHandler
         if (lobby == null)
         {
             _logger.LogWarning("갈 수 있는 로비를 찾지 못함 - 로그인 거부: {PlayerId}", playerId);
-            await TrySendRejectedAsync(responseStream, "NO_LOBBY_AVAILABLE", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.NoLobbyAvailable, cancellationToken);
             return;
         }
 
@@ -237,7 +237,7 @@ internal sealed class LoginConnectionHandler
     {
         if (string.IsNullOrEmpty(request.PlayerId) || string.IsNullOrEmpty(request.Token))
         {
-            await TrySendRejectedAsync(responseStream, "INVALID_CREDENTIALS", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidCredentials, cancellationToken);
             return;
         }
 
@@ -249,7 +249,7 @@ internal sealed class LoginConnectionHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "재진입 처리 중 세션 레지스트리 조회 실패: {PlayerId}", request.PlayerId);
-            await TrySendRejectedAsync(responseStream, "INTERNAL_ERROR", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InternalError, cancellationToken);
             return;
         }
 
@@ -258,7 +258,7 @@ internal sealed class LoginConnectionHandler
             // 세션 자체가 없거나, 있어도 소유 서버의 하트비트가 이미 만료됨 - 대조할
             // 대상이 없으므로 재진입 자체를 거부. 처음부터 다시 로그인해야 함.
             _logger.LogInformation("재진입 실패 - 살아있는 소유자 없음: {PlayerId}", request.PlayerId);
-            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.NoActiveSession, cancellationToken);
             return;
         }
 
@@ -266,7 +266,7 @@ internal sealed class LoginConnectionHandler
         if (session == null || !TokenVerification.IsValid(session, request.Token))
         {
             _logger.LogInformation("재진입 실패 - 토큰 불일치: {PlayerId}", request.PlayerId);
-            await TrySendRejectedAsync(responseStream, "INVALID_TOKEN", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.InvalidToken, cancellationToken);
             return;
         }
 
@@ -283,7 +283,7 @@ internal sealed class LoginConnectionHandler
             // 이 경우도 처음부터 다시 로그인하게 한다.
             _logger.LogInformation("재진입 실패 - 안내 불가능한 소유 서버 타입: {PlayerId} Type={Type}",
                 request.PlayerId, owner.ServerType);
-            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.NoActiveSession, cancellationToken);
             return;
         }
 
@@ -293,20 +293,30 @@ internal sealed class LoginConnectionHandler
         // session.CurrentServer에 있다(HandlePlayerJoinedAsync가 기록해둔 것).
         // 이 둘을 혼동해서 owner.Address를 그대로 안내했던 게 실제 버그였다
         // (재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
-        // 게임 에이전트의 ApprovalRequest 검증은 Status==Moving인 세션만 승인한다
-        // (정상 매칭 흐름과 판단 기준을 하나로 유지하기 위함 - GameServerHandler.
-        // HandleApprovalRequestAsync 참고). 재진입은 세션이 계속 Ingame 상태였던
-        // 채로 오므로, 미리 Moving으로 바꿔주지 않으면 "잘못된 세션 상태"로 거부당한다
-        // (재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고). 로비 재진입은 이 검사가
-        // 없어서 필요 없다 - 인게임일 때만 해준다.
-        if (destinationServerType == GameServer.Common.ServerType.Ingame)
+        // 게임 에이전트의 ApprovalRequest 검증은 Moving(서버 이동 - 티켓 필요) 또는
+        // Reconnecting(재접속 - 티켓 불필요)인 세션만 승인한다(GameServerHandler.
+        // HandleApprovalRequestAsync 참고). 인게임 재진입은 상태별로 다르게 처리한다:
+        // - Ingame: 서버는 아직 끊김을 모르지만 클라는 끊긴 경우 - Reconnecting으로 바꾼다
+        //   (안 바꾸면 "잘못된 세션 상태"로 거부당함 - 재접속 테스트 중 발견, KNOWN_ISSUES.md).
+        // - Reconnecting: 게임 에이전트가 이미 바꿔둔 경우 - 그대로 둔다.
+        // - Moving: 로비→인게임 이동 중 - 절대 바꾸지 않는다. Reconnecting으로 덮어쓰면 티켓
+        //   검증을 건너뛰는 구멍이 된다(이동 중인 클라는 티켓으로만 들어가야 함).
+        // 로비 재진입은 이 검사가 없어서 필요 없다 - 인게임일 때만 해준다.
+        if (destinationServerType == GameServer.Common.ServerType.Ingame && session.Status == PlayerStatus.Ingame)
         {
-            session.Status = PlayerStatus.Moving;
+            session.Status = PlayerStatus.Reconnecting;
             await _sessionRegistry.UpdateAsync(request.PlayerId, session);
         }
 
+        // 인게임으로 안내할 주소: 이동 중(Moving)이면 아직 도착 전이라 CurrentServer는 이전 서버
+        // (로비) 주소다 - 이동할 곳(NextServer)을 안내해야 한다. 예전엔 항상 CurrentServer를 안내해서,
+        // 첫 인게임 접속에 실패한 클라가 로그인 서버를 거치면 로비 주소로 인게임 접속을 시도하고
+        // 실패하길 반복했다. 그 외(Ingame/Reconnecting)는 실제로 접속했던 주소인 CurrentServer
+        // (HandlePlayerJoinedAsync가 기록)가 맞다.
         var redirectAddress = destinationServerType == GameServer.Common.ServerType.Ingame
-            ? session.CurrentServer
+            ? (session.Status == PlayerStatus.Moving && !string.IsNullOrEmpty(session.NextServer)
+                ? session.NextServer
+                : session.CurrentServer)
             : owner.Address;
 
         if (string.IsNullOrEmpty(redirectAddress))
@@ -314,7 +324,7 @@ internal sealed class LoginConnectionHandler
             _logger.LogWarning(
                 "재진입 실패 - 클라 접속 주소를 확인할 수 없음: {PlayerId} Type={Type}",
                 request.PlayerId, destinationServerType);
-            await TrySendRejectedAsync(responseStream, "NO_ACTIVE_SESSION", cancellationToken);
+            await TrySendRejectedAsync(responseStream, LoginRejectReason.NoActiveSession, cancellationToken);
             return;
         }
 
@@ -453,12 +463,18 @@ internal sealed class LoginConnectionHandler
         }
     }
 
+    /// <summary>
+    /// 로그인 거부를 보낸다. detail은 클라가 받긴 하지만 화면엔 안 띄우는 디버그용이다 - 그래도 클라에
+    /// 가는 값이므로 INVALID_CREDENTIALS에 "계정 없음/비번 틀림" 같은 구분을 넣으면 안 된다
+    /// (남의 계정 ID 존재 여부 확인에 악용됨). 그런 구분은 서버 로그에만 남긴다.
+    /// </summary>
     private async Task TrySendRejectedAsync(
-        IServerStreamWriter<LoginToClientMessage> responseStream, string reason, CancellationToken cancellationToken)
+        IServerStreamWriter<LoginToClientMessage> responseStream, LoginRejectReason reason,
+        CancellationToken cancellationToken, string detail = "")
     {
         await TrySendAsync(responseStream, new LoginToClientMessage
         {
-            Rejected = new LoginRejected { Reason = reason },
+            Rejected = new LoginRejected { Reason = reason, Detail = detail },
         }, cancellationToken);
     }
 

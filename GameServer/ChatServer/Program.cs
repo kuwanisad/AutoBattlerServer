@@ -1,3 +1,4 @@
+using Harness.Agent;
 using ChatServer;
 using MainServer.Common.Heartbeat;
 using Shared.Common.Hosting;
@@ -54,6 +55,9 @@ builder.Services.AddSingleton<WebSocketHandler>();
 
 // gRPC (마스터 서버와 통신)
 builder.Services.AddGrpc();
+
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 

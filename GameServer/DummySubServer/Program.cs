@@ -1,3 +1,5 @@
+using Shared.Common.Messaging;
+using Harness.Agent;
 using DummySubServer;
 using Shared.Common.Account;
 using GameServer.Common;
@@ -50,7 +52,10 @@ builder.Services.Configure<KafkaConsumerOptions>(options =>
     options.Topics = ["game-events", "match-results"];
 });
 
-// RabbitMQ 컨슈머 설정
+// RabbitMQ - 접속/재접속/발행 버퍼는 메인 서버와 같은 중개 클래스(RabbitMqBroker)가 맡는다.
+builder.Services.AddRabbitMqBroker(builder.Configuration);
+
+// RabbitMQ 컨슈머 설정(무엇을 구독할지)
 builder.Services.Configure<RabbitMqConsumerOptions>(options =>
 {
     builder.Configuration.GetSection(RabbitMqConsumerOptions.SectionName).Bind(options);
@@ -59,6 +64,9 @@ builder.Services.Configure<RabbitMqConsumerOptions>(options =>
 
 builder.Services.AddHostedService<DummyKafkaConsumer>();
 builder.Services.AddHostedService<DummyRabbitMqConsumer>();
+
+// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
+builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 

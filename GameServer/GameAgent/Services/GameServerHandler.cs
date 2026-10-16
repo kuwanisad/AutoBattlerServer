@@ -42,7 +42,7 @@ public sealed class GameServerHandler
     private readonly MatchServerConnection _matchServerConnection;
     private readonly ISessionRegistry _sessionRegistry;
     private readonly ITokenProvider _tokenProvider;
-    private readonly RabbitMqProducer _rabbitMqProducer;
+    private readonly RabbitMqBroker _rabbitMq;
     private readonly IngameMailDeliverer _mailDeliverer;
     private readonly IngameAccountServerIntermediary _accountServer;
     private readonly IngameAgentMainServerIntermediary _mainServerIntermediary;
@@ -59,15 +59,8 @@ public sealed class GameServerHandler
     // 게임 서버와의 비동기 왕복 업무 추적. 종류가 늘어나도 이 필드 하나로 다 담는다.
     private readonly PendingWorkTracker _pendingWork = new();
 
-    // 재접속 가능 여부 등 룰을 게임 타입별로 결정한다. 지금은 하드코딩된 정책이지만,
-    // 나중에 설정 파일/마스터에서 받아오는 방식으로 바뀔 수 있다.
-    private static readonly TimeSpan ReconnectGracePeriod = TimeSpan.FromSeconds(30);
-
-    private static bool GetAllowReconnect(GameServer.Common.GameType gameType) => gameType switch
-    {
-        GameServer.Common.GameType.Normal => true,
-        _ => false,
-    };
+    // 재접속 허용 여부와 유예 시간은 인게임 서버(GameMode)가 정한다 - 예전엔 여기 GameType별
+    // 정책(GetAllowReconnect)과 30초 타이머(ReconnectGracePeriod)가 따로 있었다.
 
     // roomId(=matchId) → 그 방에 지금 NGO로 접속해있는 playerId 목록.
     // CancelRoom이 왔을 때 "누구를 어디로 리다이렉트해야 하는지" 판단하는 데 쓴다.
@@ -76,16 +69,12 @@ public sealed class GameServerHandler
     private readonly object _roomPlayersLock = new();
     private readonly Dictionary<string, HashSet<string>> _roomPlayers = new();
 
-    // roomId → 그 방의 GameType. OpenRoom 보낼 때 기록해두고, HandlePlayerLeftAsync에서
-    // 재접속 허용 여부를 판단하는 데 쓴다. 같은 락으로 보호한다.
-    private readonly Dictionary<string, GameServer.Common.GameType> _roomGameType = new();
-
     public GameServerHandler(
         MasterConnectionService masterConnection,
         MatchServerConnection matchServerConnection,
         ISessionRegistry sessionRegistry,
         ITokenProvider tokenProvider,
-        RabbitMqProducer rabbitMqProducer,
+        RabbitMqBroker rabbitMq,
         IngameMailDeliverer mailDeliverer,
         IngameAccountServerIntermediary accountServer,
         IngameAgentMainServerIntermediary mainServerIntermediary,
@@ -95,7 +84,7 @@ public sealed class GameServerHandler
         _matchServerConnection = matchServerConnection;
         _sessionRegistry = sessionRegistry;
         _tokenProvider = tokenProvider;
-        _rabbitMqProducer = rabbitMqProducer;
+        _rabbitMq = rabbitMq;
         _mailDeliverer = mailDeliverer;
         _accountServer = accountServer;
         _mainServerIntermediary = mainServerIntermediary;
@@ -133,11 +122,6 @@ public sealed class GameServerHandler
         if (_serverInfo == null || !_serverInfo.IsReady)
         {
             throw new InvalidOperationException("게임 서버가 준비되지 않았습니다.");
-        }
-
-        lock (_roomPlayersLock)
-        {
-            _roomGameType[roomId] = gameType;
         }
 
         // WaitForAsync를 호출하면 그 안의 등록(TryAdd)까지는 동기적으로 끝난다
@@ -184,7 +168,6 @@ public sealed class GameServerHandler
                 connectedPlayerIds.AddRange(players);
             }
             _roomPlayers.Remove(matchId);
-            _roomGameType.Remove(matchId);
         }
 
         var redirects = new List<PlayerRedirect>();
@@ -365,6 +348,10 @@ public sealed class GameServerHandler
                         await HandlePlayerLeftAsync(message.PlayerLeft, serverInfo);
                         break;
 
+                    case GameServerMessage.PayloadOneofCase.PlayerAbandoned:
+                        await HandlePlayerAbandonedAsync(message.PlayerAbandoned);
+                        break;
+
                     case GameServerMessage.PayloadOneofCase.ApprovalRequest:
                         await HandleApprovalRequestAsync(message.ApprovalRequest, serverInfo);
                         break;
@@ -372,8 +359,11 @@ public sealed class GameServerHandler
                     case GameServerMessage.PayloadOneofCase.RoomTimeout:
                         // 게임 서버가 자체적으로 결원을 감지한 것 - CancelRoom과 같은 처리를
                         // 그대로 재사용한다(수신 루프를 안 막게 fire-and-forget).
-                        _logger.LogWarning("게임 서버가 방-채움 타임아웃 보고: {RoomId}", message.RoomTimeout.RoomId);
-                        _ = CloseRoomAndRedirectAsync(message.RoomTimeout.RoomId, "방-채움 타임아웃 (결원)");
+                        var startFailReason = string.IsNullOrEmpty(message.RoomTimeout.Reason)
+                            ? "방-채움 타임아웃 (결원)"
+                            : message.RoomTimeout.Reason;
+                        _logger.LogWarning("게임 서버가 방 시작 실패 보고: {RoomId} ({Reason})", message.RoomTimeout.RoomId, startFailReason);
+                        _ = CloseRoomAndRedirectAsync(message.RoomTimeout.RoomId, startFailReason);
                         break;
 
                     case GameServerMessage.PayloadOneofCase.FriendCommand:
@@ -518,43 +508,48 @@ public sealed class GameServerHandler
 
         if (session == null)
         {
-            response.Approved = false;
-            response.Reason = "세션 없음";
+            response.Decision = ApprovalDecision.NoSession;
             _logger.LogWarning("접속 거부 - 세션 없음: PlayerId={PlayerId}", request.PlayerId);
         }
-        else if (session.Status != PlayerStatus.Moving)
+        else if (session.Status != PlayerStatus.Moving && session.Status != PlayerStatus.Reconnecting)
         {
-            response.Approved = false;
-            response.Reason = $"잘못된 세션 상태: {session.Status}";
+            response.Decision = ApprovalDecision.InvalidSessionState;
+            response.Detail = $"status={session.Status}";
             _logger.LogWarning("접속 거부 - 잘못된 상태: PlayerId={PlayerId} Status={Status}",
                 request.PlayerId, session.Status);
+        }
+        else if (session.OwnerServerId != _masterConnection.InstanceId)
+        {
+            // 이동이든 재접속이든 이 게임 에이전트가 이미 소유자로 지정돼 있어야 한다 - 이동은
+            // 매치 확정 때 로비가 소유자를 이 서버로 넘겨두고(MatchNotificationDispatcher),
+            // 재접속은 끊긴 뒤에도 소유권을 계속 들고 있는다(HandlePlayerLeftAsync). 소유자가
+            // 비었거나(재접속 불가 방에서 끊겨 놓아준 세션) 다른 서버면 여기로 올 클라가 아니다.
+            response.Decision = ApprovalDecision.InvalidSessionState;
+            response.Detail = $"owner={(string.IsNullOrEmpty(session.OwnerServerId) ? "(없음)" : session.OwnerServerId)}";
+            _logger.LogWarning("접속 거부 - 이 서버가 소유자가 아님: PlayerId={PlayerId} Owner={Owner}",
+                request.PlayerId, session.OwnerServerId);
         }
         else if (!TokenVerification.IsValid(session, request.Token))
         {
             // 로비의 EnterLobby와 완전히 같은 판단 기준(현재/직전 토큰 대조) - 검증 로직이
             // 갈라지지 않도록 Shared.Common.Auth의 공용 함수를 그대로 재사용한다.
-            response.Approved = false;
-            response.Reason = "INVALID_TOKEN";
+            response.Decision = ApprovalDecision.InvalidToken;
             _logger.LogWarning("접속 거부 - 토큰 불일치: PlayerId={PlayerId}", request.PlayerId);
         }
-        else if (_mainServerIntermediary.HasPendingTicket(request.PlayerId) &&
+        else if (session.Status == PlayerStatus.Moving &&
                  !_mainServerIntermediary.TryConsume(request.PlayerId, request.TransferTicket))
         {
-            // 이 플레이어 앞으로 등록된 티켓이 있는데(=로비→인게임 정상 전환) 그걸
-            // 소비 못 했다(없거나 틀리거나 만료) - 훔친 영구 토큰으로 진짜 클라보다
-            // 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 재접속(이미 이 게임
-            // 에이전트가 소유자였던 경우)은 애초에 티켓이 등록된 적이 없으므로
-            // HasPendingTicket이 false라 이 분기 자체를 안 탄다 - 재접속을 막지
-            // 않는다.
+            // 서버 이동(로비→인게임) 중인 세션이면 반드시 일회용 티켓을 소비해야 한다 - 훔친 영구
+            // 토큰으로 진짜 클라보다 먼저 도착하는 걸 막기 위함(KNOWN_ISSUES.md 참고). 티켓이
+            // 없거나 틀리거나 TTL(10초)이 지나 이미 지워졌으면 거부한다. 재접속(Reconnecting)은
+            // 애초에 티켓이 발급되지 않으므로 이 분기를 안 탄다.
             //
-            // 원래는 session.OwnerServerType == Lobby로 이 둘을 구분했었는데, 매치
-            // 확정 시점에 로비가 OwnerServerType을 이미 Ingame으로 미리 바꿔버려서
-            // (재진입 로직이 필요로 함) 이 조건이 실제 접속 시점엔 항상 거짓이 되어
-            // 티켓 검증 자체가 통째로 스킵되고 있었다 - 정상 매칭도 예외 없이.
-            // HasPendingTicket으로 바꿔서 OwnerServerType과 완전히 독립적으로
-            // 판단하게 고쳤다(재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
-            response.Approved = false;
-            response.Reason = "INVALID_TRANSFER_TICKET";
+            // 예전엔 "검증이 필요한가"를 HasPendingTicket(티켓이 아직 있는가)으로 판단했다 - 그러면
+            // TTL이 지나 티켓이 지워진 뒤에 온 클라는 재접속과 구분이 안 돼서 검증 없이 통과했다.
+            // 그 전엔 OwnerServerType == Lobby로 판단했는데, 매치 확정 때 로비가 OwnerServerType을
+            // 이미 Ingame으로 바꿔버려서 항상 거짓이었다(KNOWN_ISSUES.md 참고). 이제는 세션 상태로
+            // 판단한다(Moving = 이동, Reconnecting = 재접속).
+            response.Decision = ApprovalDecision.InvalidTransferTicket;
             _logger.LogWarning("접속 거부 - 전입 티켓 불일치/만료: PlayerId={PlayerId}", request.PlayerId);
         }
         else
@@ -574,13 +569,12 @@ public sealed class GameServerHandler
 
             if (!claimed)
             {
-                response.Approved = false;
-                response.Reason = "권한 이전 거부 - 기존 서버 아직 살아있음";
+                response.Decision = ApprovalDecision.PreviousOwnerAlive;
                 _logger.LogWarning("접속 거부 - 권한 이전 거부: PlayerId={PlayerId}", request.PlayerId);
             }
             else
             {
-                response.Approved = true;
+                response.Decision = ApprovalDecision.Approved;
                 response.NewToken = newToken;
                 serverInfo.AddClientMapping(request.ClientId, request.PlayerId);
                 _logger.LogInformation("접속 승인: ClientId={ClientId} PlayerId={PlayerId}",
@@ -623,10 +617,11 @@ public sealed class GameServerHandler
                 case FriendCommandRequest.CommandOneofCase.AddFriend:
                     var addResponse = await _accountServer.AddFriendAsync(
                         request.PlayerId, request.AddFriend.FriendPlayerId);
+                    // 계정 서버의 결과를 그대로 전달한다(같은 FriendResult enum - common.proto).
                     response.AddFriend = new AddFriendResult
                     {
-                        Success = addResponse.Success,
-                        ErrorMessage = addResponse.ErrorMessage,
+                        Result = addResponse.Result,
+                        Detail = addResponse.Detail,
                     };
                     break;
 
@@ -635,8 +630,8 @@ public sealed class GameServerHandler
                         request.PlayerId, request.RemoveFriend.FriendPlayerId);
                     response.RemoveFriend = new RemoveFriendResult
                     {
-                        Success = removeResponse.Success,
-                        ErrorMessage = removeResponse.ErrorMessage,
+                        Result = removeResponse.Result,
+                        Detail = removeResponse.Detail,
                     };
                     break;
 
@@ -740,10 +735,10 @@ public sealed class GameServerHandler
 
     private async Task HandlePlayerJoinedAsync(PlayerJoined joined, GameServerInfo serverInfo)
     {
-        serverInfo.CurrentLoad++;
-        _masterConnection.UpdateStatus(serverInfo.CurrentLoad, serverInfo.Capacity);
-        _logger.LogInformation("플레이어 접속: {PlayerId} ({Load}/{Capacity})",
-            joined.PlayerId, serverInfo.CurrentLoad, serverInfo.Capacity);
+        // 부하(CurrentLoad)는 여기서 세지 않는다 - 인게임 서버가 자리 수를 세서 GameServerStatus로
+        // 보낸다(HandleStatus). 예전엔 여기서 ++, PlayerLeft에서 --를 했는데, 정상 종료된 방의
+        // 인원을 빼는 경로가 없어서 게임이 끝날 때마다 부하가 영구히 쌓였다.
+        _logger.LogInformation("플레이어 접속: {PlayerId} (RoomId={RoomId})", joined.PlayerId, joined.RoomId);
 
         lock (_roomPlayersLock)
         {
@@ -773,16 +768,21 @@ public sealed class GameServerHandler
         }
     }
 
+    /// <summary>
+    /// 인게임 서버가 "예기치 못한 이탈"을 알려왔다(정상 종료로 인한 이탈은 인게임 서버의
+    /// OnClientDisconnected가 이미 걸러서 이 메시지 자체를 안 보낸다 - KNOWN_ISSUES.md 참고).
+    /// 재접속 허용 여부와 유예 시간은 인게임 서버(GameMode)가 판단하고, 여기선 그 결과
+    /// (left.Reconnectable)대로 세션만 바꾼다 - 예전엔 게임 에이전트가 GameType으로 재접속
+    /// 여부를 따로 정하고(Unity의 GameMode와 기준이 둘), 자체 30초 타이머로 세션을 지웠다
+    /// (Unity는 20초에 탈락 - 그 사이 재접속하면 탈락자가 방에 다시 들어옴).
+    /// </summary>
     private async Task HandlePlayerLeftAsync(PlayerLeft left, GameServerInfo serverInfo)
     {
-        serverInfo.CurrentLoad = Math.Max(0, serverInfo.CurrentLoad - 1);
-        _masterConnection.UpdateStatus(serverInfo.CurrentLoad, serverInfo.Capacity);
-        _logger.LogInformation("플레이어 퇴장: {PlayerId} ({Load}/{Capacity})",
-            left.PlayerId, serverInfo.CurrentLoad, serverInfo.Capacity);
+        _logger.LogInformation("플레이어 퇴장: {PlayerId} (RoomId={RoomId}, 재접속 가능={Reconnectable})",
+            left.PlayerId, left.RoomId, left.Reconnectable);
 
         serverInfo.RemoveClientMapping(left.PlayerId);
 
-        GameServer.Common.GameType gameType;
         lock (_roomPlayersLock)
         {
             if (_roomPlayers.TryGetValue(left.RoomId, out var players))
@@ -793,81 +793,62 @@ public sealed class GameServerHandler
                     _roomPlayers.Remove(left.RoomId);
                 }
             }
-
-            gameType = _roomGameType.TryGetValue(left.RoomId, out var gt)
-                ? gt
-                : GameServer.Common.GameType.Unspecified;
         }
 
-        // PlayerLeft가 여기까지 도착했다는 사실 자체가 "예기치 못한 이탈"이라는 뜻이다 -
-        // 정상 종료(CloseRoomAndRedirectAsync)로 인한 이탈은 게임 서버(Unity)의
-        // OnClientDisconnected가 RoomManager로 이미 걸러내고 이 메시지 자체를 안 보낸다
-        // (KNOWN_ISSUES.md 참고 - 예전엔 게임 에이전트가 별도 플래그로 이걸 판단하려다가
-        // 불필요한 프로세스 간 왕복+경합을 만들었던 걸 여기로 옮겨서 해결함).
+        var session = await _sessionRegistry.GetAsync(left.PlayerId);
+        if (session == null) return;
 
-        if (!GetAllowReconnect(gameType))
+        if (!left.Reconnectable)
         {
             // 재접 불가능한 방 - 소유권을 즉시 놓는다. 클라가 아무 로비에나 재접속하면
             // EnterLobby가 소유자 없음을 보고 그냥 승인한다.
-            var session = await _sessionRegistry.GetAsync(left.PlayerId);
-            if (session != null)
-            {
-                session.Status = PlayerStatus.Moving;
-                session.CurrentServer = string.Empty;
-                session.NextServer = "lobby";
-                session.OwnerServerId = string.Empty;
-                session.OwnerServerType = GameServer.Common.ServerType.Unspecified;
-                await _sessionRegistry.UpdateAsync(left.PlayerId, session);
-            }
+            session.Status = PlayerStatus.Moving;
+            session.CurrentServer = string.Empty;
+            session.NextServer = "lobby";
+            session.OwnerServerId = string.Empty;
+            session.OwnerServerType = GameServer.Common.ServerType.Unspecified;
+            await _sessionRegistry.UpdateAsync(left.PlayerId, session);
             return;
         }
 
         // 재접 가능한 방 - 소유권은 그대로 이 게임 에이전트가 들고 있는다 (OwnerServerId 등은
-        // 안 건드림). 다만 Status는 Moving으로 바꿔둬야 한다 - ApprovalRequest 검증이
-        // Status==Moving만 승인하는데, 여기서 안 바꾸면 재접속 시도 자체가 "잘못된 세션
-        // 상태: Ingame"으로 거부당한다(재접속 테스트 중 발견 - KNOWN_ISSUES.md 참고).
-        // 클라가 재접속하면 HandlePlayerJoinedAsync가 다시 Ingame으로 되돌려놓는다.
-        var reconnectableSession = await _sessionRegistry.GetAsync(left.PlayerId);
-        if (reconnectableSession != null)
+        // 안 건드림). Status는 Reconnecting으로 바꾼다 - ApprovalRequest 검증이 이 상태면 티켓
+        // 없이 토큰만 보고 승인한다(Moving은 티켓이 있어야 하는 서버 이동 전용). 여기서 안
+        // 바꾸면 재접속 시도 자체가 "잘못된 세션 상태: Ingame"으로 거부당한다(재접속 테스트 중
+        // 발견 - KNOWN_ISSUES.md 참고). 클라가 재접속하면 HandlePlayerJoinedAsync가 다시 Ingame으로
+        // 되돌려놓는다. 유예 시간이 끝나면 인게임 서버가 PlayerAbandoned를 보낸다.
+        session.Status = PlayerStatus.Reconnecting;
+        await _sessionRegistry.UpdateAsync(left.PlayerId, session);
+    }
+
+    /// <summary>
+    /// 인게임 서버가 재접속 유예 시간이 끝나 탈락을 확정했다 - 세션을 지우고 채팅 서버에 알린다.
+    /// 지우기 전에 "아직 재접속 대기 중이고 소유자가 이 서버"인지 확인한다 - 그 사이 다른 경로로
+    /// 상태가 바뀐 세션(예: 다른 방법으로 이미 로비로 넘어감)은 건드리지 않는다.
+    /// </summary>
+    private async Task HandlePlayerAbandonedAsync(PlayerAbandoned abandoned)
+    {
+        try
         {
-            reconnectableSession.Status = PlayerStatus.Moving;
-            await _sessionRegistry.UpdateAsync(left.PlayerId, reconnectableSession);
+            var session = await _sessionRegistry.GetAsync(abandoned.PlayerId);
+            if (session == null) return;
+
+            if (session.Status != PlayerStatus.Reconnecting || session.OwnerServerId != _masterConnection.InstanceId)
+            {
+                _logger.LogInformation("탈락 확정 통지 - 세션 상태가 이미 바뀌어 그대로 둠: {PlayerId} Status={Status} Owner={Owner}",
+                    abandoned.PlayerId, session.Status, session.OwnerServerId);
+                return;
+            }
+
+            _logger.LogWarning("탈락 확정(재접속 유예 만료) - 세션 삭제: {PlayerId} (RoomId={RoomId})",
+                abandoned.PlayerId, abandoned.RoomId);
+            await _sessionRegistry.RemoveAsync(abandoned.PlayerId);
+            PublishSessionInvalidated(abandoned.PlayerId);
         }
-
-        _logger.LogInformation("재접 가능한 방 - 유예 시간({Grace}) 시작: {PlayerId} (RoomId={RoomId})",
-            ReconnectGracePeriod, left.PlayerId, left.RoomId);
-
-        var playerId = left.PlayerId;
-        var roomId = left.RoomId;
-
-        _ = Task.Run(async () =>
+        catch (Exception ex)
         {
-            try
-            {
-                await Task.Delay(ReconnectGracePeriod);
-
-                bool reconnected;
-                lock (_roomPlayersLock)
-                {
-                    reconnected = _roomPlayers.TryGetValue(roomId, out var players) && players.Contains(playerId);
-                }
-
-                if (reconnected)
-                {
-                    _logger.LogInformation("재접속 확인됨 - 세션 유지: {PlayerId}", playerId);
-                    return;
-                }
-
-                _logger.LogWarning("재접속 유예 시간 초과 - 세션 삭제: {PlayerId} (RoomId={RoomId})",
-                    playerId, roomId);
-                await _sessionRegistry.RemoveAsync(playerId);
-                PublishSessionInvalidated(playerId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "재접속 유예 타이머 처리 실패: {PlayerId}", playerId);
-            }
-        });
+            _logger.LogWarning(ex, "탈락 확정 처리 실패: {PlayerId}", abandoned.PlayerId);
+        }
     }
 
     /// <summary>
@@ -879,7 +860,7 @@ public sealed class GameServerHandler
         {
             var json = System.Text.Json.JsonSerializer.Serialize(
                 new SessionInvalidatedEvent { PlayerId = playerId });
-            _rabbitMqProducer.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
+            _rabbitMq.PublishToQueue(SessionInvalidatedEvent.QueueName, json);
         }
         catch (Exception ex)
         {
