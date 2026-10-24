@@ -1,0 +1,21 @@
+<Project>
+
+	<!--
+		테스트 전용 프로젝트(Shared/Test 아래) 공통 설정.
+
+		서버 프로젝트는 하네스를 참조하지 않는다 - 하네스 모드일 때 DevTools가 시작 훅으로 주입한다
+		(Harness.Agent/HarnessStartupHook.cs, HarnessHostingStartup.cs). 그래서 하네스 DLL들은 서버 출력 폴더가
+		아니라 여기 한 폴더에 모인다: Shared/Test/bin/<구성>/net8.0/ (Harness.Agent, Harness.Contracts, <서버>.Harness와 의존성).
+		DevTools server-common.ps1이 이 경로를 쓴다 - 바꾸면 거기도 같이 고친다.
+	-->
+
+	<!-- 위쪽(Server/Directory.Build.props - UnityProjectPath 등)을 그대로 이어받는다. -->
+	<Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
+
+	<PropertyGroup>
+		<BaseOutputPath>$(MSBuildThisFileDirectory)bin\</BaseOutputPath>
+		<!-- 클래스 라이브러리도 NuGet 의존성을 출력 폴더에 복사 - 서버에 없는 의존성을 시작 훅이 여기서 찾는다. -->
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+	</PropertyGroup>
+
+</Project>

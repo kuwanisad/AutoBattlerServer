@@ -396,8 +396,11 @@ NGO 기반 인게임 서버다.
 
 자동 E2E 테스트는 별도 저장소 `TestHarness`가 담당한다(절차는 `TestHarness/README.md`). 서버 쪽에는 테스트 전용 코드만 따로 둔다 - 실제 코드(`Shared.Common` 등)와 섞지 않는다.
 
-- **위치**: `Server/GameServer/Shared/Test/` - `Harness.Contracts`(proto 원본은 TestHarness에 있고 빌드 때 복사됨, 생성된 C#은 Unity `Assets/Scripts/Test/Harness/Generated`로 다시 복사), `Harness.Agent`(서버 쪽 에이전트).
-- **동작**: 환경 변수 `HARNESS_ADDRESS`가 있을 때만 `AddHarnessAgent`가 켜진다(없으면 아무것도 안 함). 켜지면 각 서버가 하네스에 gRPC 양방향 스트림(`HarnessControl.Attach`)으로 붙어, 하네스가 `[HarnessCommand("영역.동작")]`으로 등록된 디버그 명령을 원격 호출하고 이벤트를 받는다. 연결이 끊기면 1초마다 다시 붙는다.
+- **위치**: `Server/GameServer/Shared/Test/` - `Harness.Contracts`(proto 원본은 TestHarness에 있고 빌드 때 복사됨, 생성된 C#은 Unity `Assets/Scripts/Test/Harness/Generated`로 다시 복사), `Harness.Agent`(서버 쪽 에이전트), `<서버>.Harness`(서버별 디버그 명령, 예: `GameAgent.Harness`). 출력은 `Shared/Test/bin/`에 모인다.
+- **서버 코드에는 하네스 흔적이 없다**: 서버 프로젝트(csproj, Program.cs)는 하네스를 참조하지 않는다. 하네스 모드로 띄울 때만 DevTools가 환경 변수로 주입한다 - `DOTNET_STARTUP_HOOKS`(런타임이 Main 전에 부름, 하네스 폴더에서 어셈블리 찾기) + `ASPNETCORE_HOSTINGSTARTUPASSEMBLIES=Harness.Agent`(ASP.NET Core가 `WebApplication.CreateBuilder` 안에서 부름, `AddHarnessAgent` 등록). 정식 빌드와 평소 실행에는 하네스가 아예 없다(기준: `TestHarness/CLAUDE.md` "테스트 코드 분리").
+- **경계 장애 규칙**: 주입된 에이전트는 gRPC 인터셉터(`Harness.Agent/Fault`)를 서버 인터셉터 안쪽에 끼운다 - 하네스가 `fault.add`로 규칙을
+  걸면 받는 메시지를 고치기/버리기/늦추기/실패시킨다(규칙이 없으면 손대지 않음). 게임 코드는 이를 모른다.
+- **동작**: 주입되면 각 서버가 하네스에 gRPC 양방향 스트림(`HarnessControl.Attach`)으로 붙어, 하네스가 `[HarnessCommand("영역.동작")]`으로 등록된 디버그 명령을 원격 호출하고 이벤트를 받는다. 연결이 끊기면 1초마다 다시 붙는다.
 - **로그**: 하네스 모드로 띄우면(`DevTools/start-servers.ps1 -LogDir`) 서버 콘솔 출력이 JSON 형식으로 파일에 남고, 판정은 하네스가 한다 - 서버는 "무엇이 일어났는지"를 구체적인 값으로 로그에 남기기만 한다.
 
 ## 코딩 관례

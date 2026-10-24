@@ -2,10 +2,16 @@
 
 	<!--
 		테스트 하네스 에이전트(테스트 전용) - 서버 프로세스가 테스트 하네스에 접속해 디버그 명령을
-		받고 결과를 돌려준다. HARNESS_ADDRESS 환경 변수가 없으면(평소 실행) 아무것도 하지 않는다.
-		각 서버는 Program.cs에서 builder.Services.AddHarnessAgent() 한 줄만 부른다.
-		서버별 디버그 명령은 이 프로젝트가 아니라 각 서버 프로젝트의 Test/Harness 폴더에 둔다
-		(서버 내부를 들여다봐야 해서 - 여기 두면 이 프로젝트가 서버를 참조해야 한다).
+		받고 결과를 돌려준다.
+
+		서버 프로젝트는 이 프로젝트를 참조하지 않는다(서버 코드에 하네스 흔적 없음). 하네스 모드일 때만 DevTools가
+		환경 변수 두 개로 주입한다:
+		  DOTNET_STARTUP_HOOKS=<이 DLL 경로>              → HarnessStartupHook.cs (Main 전, 하네스 폴더에서 어셈블리 찾기)
+		  ASPNETCORE_HOSTINGSTARTUPASSEMBLIES=Harness.Agent → HarnessHostingStartup.cs (CreateBuilder 안, AddHarnessAgent)
+		출력은 Shared/Test/bin/<구성>/net8.0/ (Shared/Test/Directory.Build.props).
+
+		서버별 디버그 명령은 Shared/Test/<서버>.Harness 프로젝트에 둔다(서버를 참조해 공개된 것만 들여다봄).
+		이 프로젝트가 이름 규칙으로 찾아 읽는다 - 서버는 그 프로젝트를 모른다.
 	-->
 
 	<PropertyGroup>
@@ -17,6 +23,8 @@
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 		<PackageReference Include="Grpc.Net.Client" Version="2.63.0" />
+		<!-- 경계 장애 규칙(Fault/)의 인터셉터와 메서드 목록 - 서버들이 쓰는 Grpc.AspNetCore와 같은 버전 -->
+		<PackageReference Include="Grpc.AspNetCore.Server" Version="2.63.0" />
 	</ItemGroup>
 
 	<ItemGroup>

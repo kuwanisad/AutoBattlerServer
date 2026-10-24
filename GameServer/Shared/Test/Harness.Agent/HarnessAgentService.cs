@@ -18,10 +18,15 @@ public sealed record HarnessAgentOptions(string Address, string Name, string Pro
 ///   다시 시도해도 같은 결과라서.
 /// - 명령은 받는 대로 각자 별도 작업으로 실행한다(느린 명령이 다른 명령을 막지 않게).
 /// - 연결이 없는 동안 생긴 이벤트는 최대 10000개까지 모아뒀다가 다시 접속하면 보낸다.
+/// - 모든 명령이 같은 경로를 탄다: 실행 → 결과를 송신 큐에 넣음 → (명령이 HarnessCommandContext.AfterReply로
+///   등록했으면) 그 결과가 실제로 전송된 뒤 등록한 일을 실행(Unity 쪽 HarnessConnection과 같은 규칙).
 /// </summary>
 public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
 {
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
+
+    // 결과를 이 시간 안에 못 보내면(연결 없음) 등록된 일을 그냥 실행한다 - 하네스가 없을 때 영영 안 되는 일이 없게.
+    private static readonly TimeSpan AfterReplyTimeout = TimeSpan.FromSeconds(2);
 
     private readonly HarnessAgentOptions _options;
     private readonly HarnessCommandRegistry _registry;
@@ -29,7 +34,7 @@ public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
     private readonly ILogger<HarnessAgentService> _logger;
 
     // 송신 큐(이벤트 + 명령 결과). 연결이 바뀌어도 유지된다. 가득 차면 가장 오래된 것부터 버린다.
-    private readonly Channel<AgentMessage> _outbound = Channel.CreateBounded<AgentMessage>(
+    private readonly Channel<Outgoing> _outbound = Channel.CreateBounded<Outgoing>(
         new BoundedChannelOptions(10_000) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
 
     public HarnessAgentService(
@@ -43,7 +48,7 @@ public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
     }
 
     public void Emit(string name, string? playerId = null, object? data = null) =>
-        _outbound.Writer.TryWrite(new AgentMessage { Event = HarnessJson.CreateEvent(name, playerId, data) });
+        _outbound.Writer.TryWrite(new Outgoing(new AgentMessage { Event = HarnessJson.CreateEvent(name, playerId, data) }, null));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -142,9 +147,10 @@ public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
 
     private async Task SendLoopAsync(IClientStreamWriter<AgentMessage> requestStream, CancellationToken ct)
     {
-        await foreach (var message in _outbound.Reader.ReadAllAsync(ct))
+        await foreach (var item in _outbound.Reader.ReadAllAsync(ct))
         {
-            await requestStream.WriteAsync(message, ct);
+            await requestStream.WriteAsync(item.Message, ct);
+            item.Sent?.TrySetResult(); // 결과를 보낸 뒤 할 일(AfterReply)의 실행 조건
         }
     }
 
@@ -153,7 +159,16 @@ public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
         // 서버 로그에도 남긴다 - 타임라인에서 "이 시점에 하네스가 이걸 시켰다"가 보이게.
         _logger.LogInformation("하네스 명령 실행: {Command} id={Id} args={Args}", command.Name, command.Id, command.Args);
 
-        var result = await _registry.InvokeAsync(command, _services, ct);
+        var afterReply = HarnessCommandContext.Begin();
+        CommandResult result;
+        try
+        {
+            result = await _registry.InvokeAsync(command, _services, ct);
+        }
+        finally
+        {
+            HarnessCommandContext.End();
+        }
 
         if (result.Ok)
         {
@@ -164,8 +179,32 @@ public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
             _logger.LogWarning("하네스 명령 실패: {Command} id={Id} {Error}", command.Name, command.Id, result.Error);
         }
 
-        _outbound.Writer.TryWrite(new AgentMessage { Result = result });
+        // 실패한 명령은 아무 일도 하지 않은 것으로 본다 - 등록한 일도 버린다.
+        var actions = result.Ok ? afterReply.ToArray() : Array.Empty<Action>();
+        if (actions.Length == 0)
+        {
+            _outbound.Writer.TryWrite(new Outgoing(new AgentMessage { Result = result }, null));
+            return;
+        }
+
+        var sent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _outbound.Writer.TryWrite(new Outgoing(new AgentMessage { Result = result }, sent));
+
+        if (await Task.WhenAny(sent.Task, Task.Delay(AfterReplyTimeout)) != sent.Task)
+        {
+            _logger.LogWarning("하네스 명령 {Command} 결과를 {Seconds}초 안에 못 보냄(연결 없음) - 등록된 일을 그대로 실행",
+                command.Name, AfterReplyTimeout.TotalSeconds);
+        }
+
+        foreach (var action in actions)
+        {
+            try { action(); }
+            catch (Exception ex) { _logger.LogError(ex, "하네스 명령 {Command}의 결과 전송 후 작업 실패", command.Name); }
+        }
     }
+
+    /// <summary>송신 큐의 메시지 하나. Sent가 있으면 보내기 루프가 전송 후 완료시킨다(AfterReply 대기용).</summary>
+    private sealed record Outgoing(AgentMessage Message, TaskCompletionSource? Sent);
 
     private sealed class HarnessRejectedException : Exception
     {

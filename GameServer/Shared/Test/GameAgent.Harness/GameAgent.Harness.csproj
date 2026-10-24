@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+		GameAgent 전용 하네스 명령(테스트 전용). 서버별 명령 어셈블리 이름 규칙은 "<서버 어셈블리 이름>.Harness" -
+		Harness.Agent가 하네스 모드에서 이 이름으로 찾아 읽는다(HarnessStartupHook.cs의 HarnessLocation).
+		GameAgent는 이 프로젝트를 모른다. 이 프로젝트가 GameAgent를 들여다볼 뿐이다(공개된 것만).
+
+		GameAgent.dll은 출력에 복사하지 않는다(Private=false) - 실행 중인 GameAgent 프로세스에 이미 있다.
+	-->
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Harness.Agent\Harness.Agent.csproj" />
+		<ProjectReference Include="..\..\..\GameAgent\GameAgent.csproj" Private="false" />
+	</ItemGroup>
+
+</Project>

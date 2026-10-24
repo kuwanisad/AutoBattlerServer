@@ -1,7 +1,7 @@
 using GameAgent.Services;
 using Harness.Agent;
 
-namespace GameAgent.Test.Harness;
+namespace GameAgent.Harness;
 
 /// <summary>
 /// GameAgent 전용 하네스 명령(테스트 전용). 실제 코드는 건드리지 않고 이미 공개된 것만 읽는다.

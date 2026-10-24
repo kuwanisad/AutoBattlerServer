@@ -20,6 +20,7 @@
   <Project Path="GameServer/Shared/MatchingServer.Contracts/MatchingServer.Contracts.csproj" />
   <Project Path="GameServer/Shared/Shared.Common/Shared.Common.csproj" />
   <Project Path="GameServer/Shared/SubServer.Common/SubServer.Common.csproj" />
+  <Project Path="GameServer/Shared/Test/GameAgent.Harness/GameAgent.Harness.csproj" />
   <Project Path="GameServer/Shared/Test/Harness.Agent/Harness.Agent.csproj" />
   <Project Path="GameServer/Shared/Test/Harness.Contracts/Harness.Contracts.csproj" />
 </Solution>

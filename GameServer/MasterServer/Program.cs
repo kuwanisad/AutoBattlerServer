@@ -1,4 +1,3 @@
-using Harness.Agent;
 using Shared.Common.Hosting;
 using GameServer.Common;
 using MasterServer;
@@ -31,9 +30,6 @@ builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisO
 
 // TODO: mTLS 도입 시 CompositeServerAuthenticator(+ 개별 검증기)로 교체
 builder.Services.AddSingleton<IServerAuthenticator, DummyServerAuthenticator>();
-
-// 테스트 하네스 에이전트(테스트 전용) - HARNESS_ADDRESS 환경 변수가 없으면 아무것도 안 한다.
-builder.Services.AddHarnessAgent();
 
 var app = builder.Build();
 

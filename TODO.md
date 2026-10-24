@@ -441,7 +441,7 @@ Unity 인게임 서버가 필요한 경로라 실제 실행으로는 아직 확�
   관리자 API가 실제 전달 결과로 응답, `ActiveAnnouncements`로 재접속한 인스턴스에 켜진 공지 재전송.
 
 ### 테스트 하네스 연동
-- 서버 8개에 `Harness.Agent`(`Shared/Test/`) - `HARNESS_ADDRESS`가 있을 때만 하네스에 붙어 원격
+- 서버 8개에 `Harness.Agent`(`Shared/Test/`) - 하네스 모드에서만 DevTools가 주입(서버 프로젝트는 참조 안 함 - 시작 훅 + 호스팅 시작)해 하네스에 붙어 원격
   디버그 명령(`[HarnessCommand]`)과 이벤트 제공. `DevTools` 기동/종료 스크립트에 하네스 모드
   (`-LogDir`: JSON 로그 파일, PID 파일, 준비 대기) 추가.
 

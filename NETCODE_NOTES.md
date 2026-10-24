@@ -12,10 +12,18 @@
 딱 한 번만 평가되고 끝난다. 델리게이트 내부에서 참조하는 상태(예: "현재
 오너인가")가 나중에 바뀌어도 NGO가 알아서 다시 물어봐주지 않는다.
 
-**실제로 확인한 것**: 클라가 접속을 끊었다가 재접속하면(=새 NGO 연결이 생기는
-것이므로) 그 시점에 게이트가 다시 평가돼서 재접속한 클라가 자기 소유
-NetworkObject를 정상적으로 다시 볼 수 있다. 즉 "재접속"이라는 이벤트 자체가
-"새 클라 접속"이라 자동으로 해결된다.
+**정정(2026-10-24, NGO 2.11.0 소스와 하네스 reconnect 실행으로 확인)**: 예전에 여기 "재접속은 새 클라 접속이라
+게이트가 다시 평가돼 자동으로 해결된다"고 적었는데, 그건 재접속 때마다 오브젝트를 새로 스폰하던 시절 얘기다.
+지금처럼 PlayerController/Pawn/방 오브젝트를 살려 두면 틀린다:
+- 새 접속의 평가 시점은 **승인 직후 동기화를 시작할 때**다(`NetworkConnectionManager.HandleConnectionApproval` →
+  `NetworkSceneManager.SynchronizeNetworkObjects` → `NetworkSpawnManager.UpdateObservedNetworkObjects`). 서버의
+  `OnClientConnected` 콜백은 클라가 동기화를 끝낸 **뒤**에 불린다(`SceneEventType.SynchronizeComplete`).
+- 그래서 `OnClientConnected`에서 바꾸는 상태(소유권, 방 접속자 목록)는 그 평가에 반영되지 않는다 - 그 상태를 보는
+  델리게이트는 재접속 클라에게 false를 냈고, 오브젝트가 영영 안 갔다(10-23 하네스 reconnect: 재진입 뒤 Pawn/View/UI 없음,
+  phase.changed 없음).
+- 지금 구조: 보낼 대상은 방의 레플리케이션 트리(`Network/Framework/ReplicationTree.cs`)가 정하고, 재접속은 접속 완료 뒤
+  트리가 그 좌석 경로를 `NetworkShow`한다(아래 2번 규칙). 델리게이트는 트리를 보고(좌석이 있는 clientId일 때만), 스폰
+  때 평가에 쓰인다.
 
 **하지만** 이미 접속해 있는 클라를 대상으로 가시성을 나중에 동적으로 바꾸고
 싶은 경우(예: 전투 페이즈에 상대 보드를 보여준다, 탈락한 플레이어에게 관전
@@ -39,18 +47,18 @@ NetworkObject를 정상적으로 다시 볼 수 있다. 즉 "재접속"이라는
 **규칙**: 동적 가시성 변경은 반드시 `NetworkShow`/`NetworkHide`로. Despawn/Spawn
 은 정말로 오브젝트를 통째로 다시 만들어야 하는 상황에만 쓴다.
 
-## 3. ChangeOwnership은 ConnectionApproval 승인 직후에 호출 가능하다
+## 3. ChangeOwnership은 그 오브젝트를 이미 받고 있는(관찰자) 클라에게만 된다
 
-**실제로 확인한 것**: 아직 NGO 연결이 완전히 안 끝난 `ConnectionApproval`
-콜백 안에서 `NetworkObject.ChangeOwnership(clientId)`를 호출해도 정상 동작한다.
-`CustomMessagingManager`로 실제 패킷을 보내는 것과 달리(이건 연결이 완전히
-성립해야 함 - `IngameServerInstance`가 `ConnectionWelcome`을 `OnClientConnected`
-까지 미루는 이유), `ChangeOwnership`은 스폰된 오브젝트의 메타데이터를 바꾸는
-것뿐이라 이 제약을 안 받는다.
+**정정(2026-10-24, NGO 2.11.0 소스)**: 예전에 여기 "ConnectionApproval 승인 직후에 ChangeOwnership을 불러도 정상
+동작한다"고 적었는데, 2.11.0에서는 아니다. `NetworkSpawnManager.ChangeOwnership`은 새 주인이 그 오브젝트의
+관찰자(`Observers`)가 아니면 **아무것도 안 바꾸고 돌아간다**(경고는 로그 수준 Developer일 때만 - 평소엔 조용함).
+승인 시점의 새 clientId는 아직 아무것도 받지 않았으므로 그때의 소유권 반환은 효과가 없었다(서버 로그 "소유권 반환"은
+호출 뒤 무조건 찍혀서 증거가 못 됐다).
 
-`ConnectionApproval` 시점엔 이미 `playerId`가 확정돼 있으므로(티켓/토큰 검증이
-여기서 끝남), 재접속한 플레이어의 PlayerController 소유권을 이 시점에 바로
-되돌려줄 수 있다 - `OnClientConnected`까지 기다릴 필요 없음.
+**규칙**: 소유권은 `NetworkShow` 뒤에 바꾼다. `NetworkShow`는 즉시 관찰자로 넣고 스폰 메시지는 프레임 끝에 보내므로,
+같은 프레임에 `ChangeOwnership`하면 그 스폰 메시지에 새 주인이 실려 클라가 받는 순간 `IsOwner`다(그 사이 소유권 변경
+메시지는 보류 중인 Show라 따로 안 감). 서버로 회수(`ChangeOwnership(ServerClientId)`)가 되려면 서버도 관찰자여야
+한다 - `SpawnWithObservers`(기본 true)일 때만 서버가 들어간다. 그래서 방 오브젝트는 기본값으로 스폰한다.
 
 ## 4. 확정된 소유권/생명주기 규칙 (PlayerController)
 
@@ -67,7 +75,8 @@ NetworkObject를 정상적으로 다시 볼 수 있다. 즉 "재접속"이라는
 - **`NetworkObject.DontDestroyWithOwner`는 그 방 `IGameMode.AllowReconnect` 값을
   그대로 사용한다.** 프리팹에 고정하지 않고 스폰 시점에 런타임으로 설정 - 게임
   모드가 늘어나도 프리팹 하나로 대응 가능.
-- **가시성**: PlayerController는 오너 한 명한테만 보이도록 스폰 시 설정한다.
+- **가시성**: PlayerController는 그 플레이어(좌석) 한 명한테만 보이도록 레플리케이션 트리의 플레이어 노드에 넣는다
+  (오너가 아니라 좌석 기준 - 재접속으로 clientId가 바뀌어도 그대로 맞다).
   다른 플레이어가 이 플레이어의 공개 정보(체력/레벨 등)를 봐야 한다면 그건
   `GameState`가 별도로 노출한다 - PlayerController를 다른 클라에 보여주는 방식이
   아님.
