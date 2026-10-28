@@ -1,3 +1,4 @@
+using Harness.Shared;
 using System.Threading.Channels;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -23,10 +24,10 @@ public sealed record HarnessAgentOptions(string Address, string Name, string Pro
 /// </summary>
 public sealed class HarnessAgentService : BackgroundService, IHarnessEvents
 {
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(HarnessSharedConstants.Connection.RetryDelaySeconds);
 
     // 결과를 이 시간 안에 못 보내면(연결 없음) 등록된 일을 그냥 실행한다 - 하네스가 없을 때 영영 안 되는 일이 없게.
-    private static readonly TimeSpan AfterReplyTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan AfterReplyTimeout = TimeSpan.FromSeconds(HarnessSharedConstants.Connection.AfterReplyTimeoutSeconds);
 
     private readonly HarnessAgentOptions _options;
     private readonly HarnessCommandRegistry _registry;

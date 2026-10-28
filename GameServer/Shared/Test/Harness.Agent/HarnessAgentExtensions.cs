@@ -1,3 +1,4 @@
+using Harness.Shared;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -7,10 +8,10 @@ namespace Harness.Agent;
 public static class HarnessAgentExtensions
 {
     /// <summary>하네스 주소(예: http://localhost:9000). 테스트 하네스가 서버를 띄울 때 넣어준다.</summary>
-    public const string AddressVariable = "HARNESS_ADDRESS";
+    public const string AddressVariable = HarnessSharedConstants.EnvironmentVariables.Address;
 
     /// <summary>하네스에서 이 프로세스를 부를 이름. 없으면 실행 파일(어셈블리) 이름.</summary>
-    public const string NameVariable = "HARNESS_NAME";
+    public const string NameVariable = HarnessSharedConstants.EnvironmentVariables.Name;
 
     /// <summary>
     /// 테스트 하네스 에이전트를 등록한다. 서버 코드가 부르지 않는다 - <see cref="HarnessHostingStartup"/>이 부른다.

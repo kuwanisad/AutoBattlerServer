@@ -1,3 +1,4 @@
+using Harness.Shared;
 using System.Reflection;
 using System.Text.Json;
 using Google.Protobuf;
@@ -24,7 +25,7 @@ internal sealed class FaultCommands
         _services = services;
     }
 
-    [HarnessCommand("fault.methods", Description = "이 서버가 받는 gRPC 메서드 목록(장애 규칙의 method 값): 이름, 종류(Unary/ServerStreaming ...), " +
+    [HarnessCommand(HarnessSharedConstants.Commands.FaultMethods, Description = "이 서버가 받는 gRPC 메서드 목록(장애 규칙의 method 값): 이름, 종류(Unary/ServerStreaming ...), " +
                                                    "요청/응답 메시지와 필드 경로(protobuf JSON 이름 - match/rewrite에 쓰는 경로). query로 이름 거르기")]
     public object Methods(string? query = null)
     {
@@ -41,7 +42,7 @@ internal sealed class FaultCommands
         return new { methods, count = methods.Count };
     }
 
-    [HarnessCommand("fault.add", Description = "경계 장애 규칙을 건다(이 서버가 받는 gRPC 호출). method(전체 이름 또는 *), dir(request=들어오는 것 | " +
+    [HarnessCommand(HarnessSharedConstants.Commands.FaultAdd, Description = "경계 장애 규칙을 건다(이 서버가 받는 gRPC 호출). method(전체 이름 또는 *), dir(request=들어오는 것 | " +
                                                "response=내보내는 것, 스트림은 메시지마다), action(rewrite | drop | delay | fail), playerId(그 플레이어 호출만 - 인증하는 서버에서), " +
                                                "match({경로: 값 | {$exists: bool} | {$in: [...]}}), rewrite({경로: 새 값}), delayMs, failStatus(gRPC 상태 이름), " +
                                                "times(N번 걸리면 끝), seconds(S초 뒤 끝). 경로는 protobuf JSON 이름(fault.methods). 걸릴 때마다 fault.hit, 끝나면 fault.ended")]
@@ -97,11 +98,11 @@ internal sealed class FaultCommands
         return rule.View();
     }
 
-    [HarnessCommand("fault.remove", Description = "장애 규칙을 끈다(ruleId). 끄면 fault.ended(reason=removed)")]
+    [HarnessCommand(HarnessSharedConstants.Commands.FaultRemove, Description = "장애 규칙을 끈다(ruleId). 끄면 fault.ended(reason=removed)")]
     public object Remove(string ruleId) =>
         _rules.Remove(ruleId) ? new { ruleId, removed = true } : throw new ArgumentException($"규칙 '{ruleId}' 없음(이미 끝났을 수 있음 - fault.list)");
 
-    [HarnessCommand("fault.list", Description = "지금 켜진 장애 규칙(걸린 횟수, 남은 횟수, 끝나는 시각)")]
+    [HarnessCommand(HarnessSharedConstants.Commands.FaultList, Description = "지금 켜진 장애 규칙(걸린 횟수, 남은 횟수, 끝나는 시각)")]
     public object List() => new { rules = _rules.List() };
 
     private static IReadOnlyDictionary<string, JsonElement> ToMap(JsonElement? value, string name)

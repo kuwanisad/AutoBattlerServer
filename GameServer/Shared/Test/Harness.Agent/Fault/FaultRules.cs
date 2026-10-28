@@ -1,3 +1,4 @@
+using Harness.Shared;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Google.Protobuf;
@@ -97,7 +98,7 @@ public sealed class FaultRuleSet : IDisposable
 {
     private static readonly JsonFormatter Formatter = new(new JsonFormatter.Settings(formatDefaultValues: true));
     private static readonly JsonParser Parser = new(JsonParser.Settings.Default.WithIgnoreUnknownFields(true));
-    private const int PreviewChars = 400;
+    private const int PreviewChars = HarnessAgentConstants.Fault.PreviewChars;
 
     private readonly object _lock = new();
     private readonly List<FaultRule> _rules = new();
@@ -108,7 +109,8 @@ public sealed class FaultRuleSet : IDisposable
     public FaultRuleSet(IHarnessEvents events)
     {
         _events = events;
-        _expiry = new Timer(_ => ExpireDue(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _expiry = new Timer(_ => ExpireDue(), null, TimeSpan.FromSeconds(HarnessAgentConstants.Fault.ExpiryCheckSeconds),
+            TimeSpan.FromSeconds(HarnessAgentConstants.Fault.ExpiryCheckSeconds));
     }
 
     public void Dispose() => _expiry.Dispose();
@@ -203,7 +205,7 @@ public sealed class FaultRuleSet : IDisposable
             before = Preview((json ?? ToJson(message)).ToJsonString());
         }
 
-        _events.Emit("fault.hit", playerId, new
+        _events.Emit(HarnessSharedConstants.Events.FaultHit, playerId, new
         {
             ruleId = rule.Id,
             method,
@@ -250,7 +252,7 @@ public sealed class FaultRuleSet : IDisposable
     }
 
     private void Ended(FaultRule rule, string reason) =>
-        _events.Emit("fault.ended", rule.PlayerId, new { ruleId = rule.Id, reason, hits = rule.Hits, method = rule.Method, dir = rule.Direction.ToString() });
+        _events.Emit(HarnessSharedConstants.Events.FaultEnded, rule.PlayerId, new { ruleId = rule.Id, reason, hits = rule.Hits, method = rule.Method, dir = rule.Direction.ToString() });
 
     private static JsonObject ToJson(IMessage message) => JsonNode.Parse(Formatter.Format(message))!.AsObject();
 

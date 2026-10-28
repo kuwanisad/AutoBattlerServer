@@ -1,3 +1,4 @@
+using Harness.Shared;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -81,7 +82,7 @@ public sealed class HarnessCommandRegistry
         if (!_commands.TryGetValue(command.Name, out var entry))
         {
             result.Ok = false;
-            result.Error = $"모르는 명령 '{command.Name}'";
+            result.Error = $"{HarnessSharedConstants.Errors.UnknownCommand} '{command.Name}'";
             return result;
         }
 
@@ -97,6 +98,8 @@ public sealed class HarnessCommandRegistry
             return result;
         }
 
+        // DoNotWrapExceptions: 명령이 던진 예외를 리플렉션이 감싸지(잡지) 않고 아래 catch로 그대로 보낸다 - 감싸면 예외를 처음 잡는 곳이
+        // .NET 내부 코드가 돼서 VS 디버거가 "사용자가 처리하지 않은 예외"로 멈춘다. 실패는 그대로 하네스에 알린다(Ok=false, Error).
         try
         {
             object? target = null;
@@ -105,12 +108,12 @@ public sealed class HarnessCommandRegistry
                 // 호출마다 새로 만든다 - 명령 클래스는 상태 없이, 필요한 서버 서비스만 생성자로 받는다.
                 using var scope = services.CreateScope();
                 target = ActivatorUtilities.CreateInstance(scope.ServiceProvider, entry.Method.DeclaringType!);
-                var value = await UnwrapAsync(entry.Method.Invoke(target, arguments));
+                var value = await UnwrapAsync(entry.Method.Invoke(target, BindingFlags.DoNotWrapExceptions, binder: null, arguments, culture: null));
                 SetValue(result, value);
             }
             else
             {
-                var value = await UnwrapAsync(entry.Method.Invoke(null, arguments));
+                var value = await UnwrapAsync(entry.Method.Invoke(null, BindingFlags.DoNotWrapExceptions, binder: null, arguments, culture: null));
                 SetValue(result, value);
             }
 
@@ -118,9 +121,8 @@ public sealed class HarnessCommandRegistry
         }
         catch (Exception ex)
         {
-            var inner = ex is TargetInvocationException { InnerException: { } e } ? e : ex;
             result.Ok = false;
-            result.Error = $"{inner.GetType().Name}: {inner.Message}";
+            result.Error = $"{ex.GetType().Name}: {ex.Message}";
         }
 
         return result;
